@@ -388,7 +388,7 @@ app.post("/verify-location", (req, res) => {
   const CAFE_LNG = 10.72152628978018;
   const distance = getDistance(lat, lng, CAFE_LAT, CAFE_LNG);
 
-  return res.json({ authorized: distance <= 100 });
+  return res.json({ authorized: distance <= 120 });
 });
 
 // GET active promotion (for discounts)

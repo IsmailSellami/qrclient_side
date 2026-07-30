@@ -930,7 +930,7 @@ async function verifierLocalisation() {
                     });
 
                     const data = await response.json();
-
+                    
                     if (data.authorized) {
                         resolve(true);
                     } else {
