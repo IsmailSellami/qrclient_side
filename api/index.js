@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import cors from 'cors';
@@ -10,7 +9,8 @@ const { Pool } = pg;
 
 const app = express();
 
-/* ───── Vercel environment ───── */
+/* ───── Environment ───── */
+
 const LOYALTY_APP_URL = process.env.LOYALTY_APP_URL || 'https://qrcode-client-alpha.vercel.app';
 
 /* ───── Security helpers ───── */
@@ -38,14 +38,11 @@ function csrfProtection(req, res, next) {
   next();
 }
 
-/* ================= MIDDLEWARES ================= */
+/* ───── Middlewares ───── */
 
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    cb(null, true);
-  },
-  credentials: true,
+  origin: true,
+  credentials: false,
 }));
 
 app.use(helmet({
@@ -89,13 +86,13 @@ app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 app.use(csrfProtection);
 
-/* ================= SUPABASE CLIENT ================= */
+/* ───── Supabase client (health check) ───── */
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
-/* ================= DATABASE POOL ================= */
+/* ───── Database pool ───── */
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -105,19 +102,21 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
-/* ================= ROUTES ================= */
+/* ───── Routes ───── */
 
 // Redirect loyalty card page to the separate qrcode-client app
 app.get('/loyalty/:token', (req, res) => {
   res.redirect(301, `${LOYALTY_APP_URL}/loyalty/${req.params.token}`);
 });
 
-// Supabase health check
+// Supabase / database health check
 app.get('/supabase-health', async (_req, res) => {
-  if (!supabase) return res.status(500).json({ ok: false });
   try {
-    const { error } = await supabase.from('categorie').select('id').limit(1);
-    if (error) return res.status(500).json({ ok: false });
+    if (supabase) {
+      const { error } = await supabase.from('categorie').select('idcat').limit(1);
+      if (error) return res.status(500).json({ ok: false });
+    }
+    await pool.query('SELECT 1');
     res.json({ ok: true });
   } catch {
     res.status(500).json({ ok: false });

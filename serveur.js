@@ -19,6 +19,10 @@ dns.setDefaultResultOrder('verbatim');
 const app = express();
 const port = process.env.PORT || 3991;
 
+/* ───── Environment ───── */
+
+const LOYALTY_APP_URL = process.env.LOYALTY_APP_URL || 'https://qrcode-client-alpha.vercel.app';
+
 /* ───── Security helpers ───── */
 
 function isSameOrigin(req) {
@@ -44,7 +48,7 @@ function csrfProtection(req, res, next) {
   next();
 }
 
-/* ================= MIDDLEWARES ================= */
+/* ───── Middlewares ───── */
 
 const allowedOrigins = [
   `http://localhost:${port}`,
@@ -94,23 +98,16 @@ const paymentLimiter = rateLimit({
   message: { success: false, error: 'Trop de requêtes' },
 });
 
-const strictLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, error: 'Trop de requêtes' },
-});
-
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 app.use(csrfProtection);
 
 // static files
-app.use(express.static(path.join(__dirname, 'file')));
+app.use('/css', express.static(path.join(__dirname, 'public', 'css')));
+app.use('/js', express.static(path.join(__dirname, 'public', 'js')));
 
-/* ================= SUPABASE CLIENT ================= */
+/* ───── Supabase client (health check) ───── */
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -122,7 +119,7 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-/* ================= DATABASE (Supabase PostgreSQL) ================= */
+/* ───── Database (Supabase PostgreSQL) ───── */
 
 if (!process.env.DATABASE_URL) {
   console.error('❌ Missing DATABASE_URL in environment variables.');
@@ -134,7 +131,7 @@ const client = new Client({
   ssl: { rejectUnauthorized: false }
 });
 
-/* ================= START SERVER ================= */
+/* ───── Start server ───── */
 
 async function startServer() {
   try {
@@ -173,17 +170,16 @@ async function startServer() {
 
 startServer();
 
-/* ================= ROUTES ================= */
+/* ───── Routes ───── */
 
 // home
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'file', 'html', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // loyalty page — redirect to the deployed qrcode-client app
 app.get('/loyalty/:token', (req, res) => {
-  const loyaltyUrl = process.env.LOYALTY_APP_URL || 'https://qrcode-client-alpha.vercel.app';
-  res.redirect(301, `${loyaltyUrl}/loyalty/${req.params.token}`);
+  res.redirect(301, `${LOYALTY_APP_URL}/loyalty/${req.params.token}`);
 });
 
 // loyalty token lookup (public)
@@ -220,7 +216,7 @@ app.get('/api/loyalty/token/:token', async (req, res) => {
 
 app.get('/supabase-health', async (req, res) => {
   try {
-    const { error } = await supabase.from('categorie').select('id').limit(1);
+    const { error } = await supabase.from('categorie').select('idcat').limit(1);
     if (error) return res.status(500).json({ ok: false });
     res.json({ ok: true });
   } catch (e) {
@@ -255,19 +251,19 @@ app.post('/demander', async (req, res) => {
   const payload = req.body || {};
   const numtable = Number(req.body.numtable);
 
-if (!numtable) {
-  return res.status(400).json({ success: false, error: "INVALID_TABLE" });
-}
-  
+  if (!numtable) {
+    return res.status(400).json({ success: false, error: "INVALID_TABLE" });
+  }
+
   const items = Array.isArray(payload.items) ? payload.items : [];
   const totale = Number(payload.totale);
-  
-  if (!items.length){
-    return res.status(400).json({ success: false, error: 'EMPTY_CART' });
+
+  if (!items.length) {
     console.log('⚠️ Empty cart received');
-    }
- 
-  if (!totale){
+    return res.status(400).json({ success: false, error: 'EMPTY_CART' });
+  }
+
+  if (!totale) {
     console.log('⚠️ Invalid total received');
     return res.status(400).json({ success: false, error: 'INVALID_TOTAL' });
   }
@@ -289,12 +285,12 @@ if (!numtable) {
     for (const row of priceResult.rows) {
       priceMap[row.idname] = Number(row.price || 0);
     }
-    const now = new Date().toISOString();
+    const nowIso = new Date().toISOString();
     const promoResult = await client.query(`
       SELECT discount_percent, minimum_purchase_amount FROM promotion
       WHERE start_date <= $1 AND end_date >= $1
       ORDER BY discount_percent DESC LIMIT 1
-    `, [now]);
+    `, [nowIso]);
     if (promoResult.rowCount > 0) {
       discountPercent = Number(promoResult.rows[0].discount_percent);
       const minimumPurchaseAmount = Number(promoResult.rows[0].minimum_purchase_amount || 0);
@@ -319,26 +315,22 @@ if (!numtable) {
       const recuInsert = await client.query(
         'INSERT INTO recu (id, totale, date, heurd, heurf, type) VALUES ($1,$2,$3,$4,$5,$6) RETURNING idrecu',
         [numtable, totale, dateStr, timeStr, null, 'pending']
-        
       );
-      
 
       idrecu = recuInsert.rows[0].idrecu;
-
-    }  else {
-    idrecu = verifyTable.rows[0].idrecu;
-      
-    const updateResult = await client.query(
+    } else {
+      idrecu = verifyTable.rows[0].idrecu;
+      const updateResult = await client.query(
         'UPDATE recu SET totale=totale+$1 , type=$3 WHERE idrecu=$2 RETURNING idrecu, totale',
         [Number(totale), idrecu, 'pending']
-    );
-console.log('ℹ️ Existing open recu found for table', numtable, 'with idrecu:', idrecu);
-    if (updateResult.rowCount > 0) {
+      );
+      console.log('ℹ️ Existing open recu found for table', numtable, 'with idrecu:', idrecu);
+      if (updateResult.rowCount > 0) {
         console.log('✅ recu updated');
-    } else {
+      } else {
         console.log('⚠️ No recu was updated. Something went wrong.');
+      }
     }
-} 
     for (const item of items) {
       const basePrice = priceMap[String(item.idname)] || 0;
       const itemPrix = discountPercent > 0
@@ -349,17 +341,16 @@ console.log('ℹ️ Existing open recu found for table', numtable, 'with idrecu:
         [idrecu, numtable, String(item.idname), item.optionn ?? null, 'online', 'Pending', itemPrix]
       );
     }
-console.log('ℹ️ Current idrecu:', idrecu);
+    console.log('ℹ️ Current idrecu:', idrecu);
     await client.query('COMMIT');
 
     res.json({ success: true, idrecu });
   } catch (err) {
-    await client.query('ROLLBACK');         
+    await client.query('ROLLBACK');
     console.error(err);
     res.status(500).json({ success: false });
   }
-}); 
-
+});
 
 function getDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000; // mètres
@@ -455,7 +446,6 @@ app.post('/verify-qr', paymentLimiter, async (req, res) => {
   if (!qrId || typeof qrId !== 'string' || qrId.length < 24) {
     return res.status(400).json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
   }
-  console.log("red -----------------------------------------------greeen jfizef")
   const totalNum = Number(total.toFixed(2));
 
   // Check for active promotion
@@ -516,21 +506,17 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
 
   const urlMatch = qrId && typeof qrId === 'string' ? qrId.match(/\/loyalty\/([a-f0-9]{24})/i) : null;
   if (urlMatch) qrId = urlMatch[1];
-  console.log('Processing card payment for QR ID:', qrId, 'Receipt ID:', idrecu, 'Total:', total);
   if (!qrId || typeof qrId !== 'string' || qrId.length < 24) {
-    console.log('Invalid QR ID:', qrId);
     return res.status(400).json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
   }
 
   const idrecuNum = Number(idrecu);
   if (!idrecu || isNaN(idrecuNum) || idrecuNum <= 0) {
-    console.log('Invalid receipt ID:', idrecu);
     return res.status(400).json({ success: false, error: 'MISSING_PARAMS' });
   }
 
   const totalNum = Number(total);
   if (isNaN(totalNum) || totalNum <= 0 || !Number.isFinite(totalNum)) {
-    console.log('Invalid total amount:', total);
     return res.status(400).json({ success: false, error: 'INVALID_TOTAL' });
   }
 
@@ -566,21 +552,16 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
     const byToken = await client.query('SELECT token,points,status FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
     if (byToken.rowCount === 0) {
       await client.query('ROLLBACK');
-      console.log('Customer not found for QR ID:', qrId);
       return res.json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
     }
 
     const customerRow = byToken.rows[0];
-    console.log('Customer found:', customerRow);
     const currentPoints = Number(customerRow.points);
     if (currentPoints < discountedTotal) {
       await client.query('ROLLBACK');
-      console.log('Insufficient points for customer. Current:', currentPoints, 'Required:', discountedTotal);
       return res.json({ success: false, error: 'INSUFFICIENT_POINTS' });
     }
-    console.log('Deducted', discountedTotal, 'points from customer token:', customerRow.token, 'Current points before deduction:', currentPoints);
-    discountedTotal=Number(discountedTotal.toFixed(3));
-    const totalNum = Math.round(Number(discountedTotal));
+    discountedTotal = Number(discountedTotal.toFixed(3));
     await client.query('UPDATE qr_code SET points = points - $1, updated_at = NOW() WHERE token = $2', [discountedTotal, customerRow.token]);
 
     await client.query("UPDATE orderr SET paid = 'oui' WHERE idrecu = $1", [idrecuNum]);
