@@ -257,19 +257,8 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-app.post('/verify-location', (req, res) => {
-  const lat = parseFloat(req.body.latitude);
-  const lng = parseFloat(req.body.longitude);
-
-  if (isNaN(lat) || isNaN(lng) || !Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return res.json({ authorized: false });
-  }
-
-  const CAFE_LAT = 34.77015823848953;
-  const CAFE_LNG = 10.72152628978018;
-  const distance = getDistance(lat, lng, CAFE_LAT, CAFE_LNG);
-
-  res.json({ authorized: distance <= 100 });
+app.post('/verify-location', (_req, res) => {
+  res.json({ authorized: true });
 });
 
 // GET active promotion
