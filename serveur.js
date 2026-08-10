@@ -238,7 +238,7 @@ app.get('/getdata', async (req, res) => {
 // get products
 app.get('/product', async (req, res) => {
   try {
-    const result = await client.query('SELECT * FROM product');
+    const result = await client.query('SELECT * FROM product WHERE archived = FALSE');
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -538,7 +538,7 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const byToken = await client.query('SELECT token,points,status FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
+    const byToken = await client.query('SELECT token,points,status,name FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
     if (byToken.rowCount === 0) {
       await client.query('ROLLBACK');
       return res.json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
@@ -553,7 +553,7 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
     discountedTotal = Number(discountedTotal.toFixed(3));
     await client.query('UPDATE qr_code SET points = points - $1, updated_at = NOW() WHERE token = $2', [discountedTotal, customerRow.token]);
 
-    await client.query("UPDATE orderr SET paid = 'oui' WHERE idrecu = $1", [idrecuNum]);
+    await client.query("UPDATE orderr SET paid = 'oui', nom_ut = $2 WHERE idrecu = $1", [idrecuNum, customerRow.name || null]);
 
     // Update recu with payment details: actual revenue, payment method, discount
     await client.query(`

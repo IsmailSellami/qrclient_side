@@ -29,9 +29,18 @@ const qrResult = document.getElementById("qrResult");
 const qrManualToggle = document.getElementById("qrManualToggle");
 const qrManualSection = document.getElementById("qrManualSection");
 const qrCameraError = document.getElementById("qrCameraError");
+const qrFlashBtn = document.getElementById("qrFlashBtn");
 
 let html5QrCode = null;
 let qrScannerRunning = false;
+let qrTorchOn = false;
+let qrNativeStream = null;
+let qrNativeDetector = null;
+let qrNativeRafId = null;
+let qrNativeVideo = null;
+let qrNativeInFlight = false;
+let qrStartPromise = null;
+let html5QrcodeLibPromise = null;
 
 const cashOverlay = document.getElementById("cashOverlay");
 const cashModal = document.getElementById("cashModal");
@@ -56,7 +65,7 @@ const caractereImg = document.getElementById("caractereImg");
 const caractereOptions = document.getElementById("caractereOptions");
 const promotionBanner = document.getElementById("promotionBanner");
 const params = new URLSearchParams(window.location.search);
-const numtable = Number(params.get("table")) || 12;
+const numtable = Number(params.get("table")) || 45;
 
 console.log("TABLE =", numtable);
 let selectedCategory = "Tous";
@@ -348,6 +357,8 @@ function createCard(product) {
     const img = document.createElement("img");
     img.className = "card_img";
     img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
     img.src = `${product.img}`;
     img.addEventListener("click", () => openCaractereModal(product));
 
@@ -675,6 +686,9 @@ function showQrModal() {
   qrCameraError.textContent = "";
   qrInput.value = "";
   qrManualSection.classList.remove("visible");
+  qrTorchOn = false;
+  setTorchButton(false);
+  if (qrFlashBtn) qrFlashBtn.style.display = "none";
   setModal(qrModal, qrOverlay, true);
 }
 
@@ -698,58 +712,257 @@ function hideCashModal() {
 /* ===== QR Code Camera Scanner ===== */
 
 function startQrScanner() {
-  if (qrScannerRunning) return;
-  if (typeof Html5Qrcode === "undefined") {
-    qrCameraError.textContent = "Erreur de chargement du scanner. Utilisez la saisie manuelle.";
-    qrCameraError.style.display = "block";
-    qrManualSection.classList.add("visible");
-    return;
-  }
+  if (qrScannerRunning || qrStartPromise) return;
 
+  qrStartPromise = (async () => {
+    try {
+      if (await isNativeQrSupported()) {
+        await startNativeQrScanner();
+      } else {
+        await loadHtml5QrcodeLib();
+        await startHtml5QrScanner();
+      }
+      qrScannerRunning = true;
+      qrCameraError.style.display = "none";
+      refreshFlashButton();
+    } catch (err) {
+      console.error("[QR] camera start failed:", err);
+      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle.";
+      qrCameraError.style.display = "block";
+      qrManualSection.classList.add("visible");
+      stopQrScanner();
+    } finally {
+      qrStartPromise = null;
+    }
+  })();
+
+  return qrStartPromise;
+}
+
+function loadHtml5QrcodeLib() {
+  if (window.Html5Qrcode) return Promise.resolve();
+  if (html5QrcodeLibPromise) return html5QrcodeLibPromise;
+
+  html5QrcodeLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js";
+    s.async = true;
+    s.onload = () => (window.Html5Qrcode ? resolve() : reject(new Error("Html5Qrcode missing")));
+    s.onerror = () => reject(new Error("Scanner library failed to load"));
+    document.head.appendChild(s);
+  });
+
+  return html5QrcodeLibPromise;
+}
+
+async function isNativeQrSupported() {
+  if (typeof window === "undefined" || !("BarcodeDetector" in window)) return false;
   try {
-    html5QrCode = new Html5Qrcode("qr-reader");
-  } catch (e) {
-    qrCameraError.textContent = "Impossible d'initialiser le scanner. Utilisez la saisie manuelle.";
-    qrCameraError.style.display = "block";
-    qrManualSection.classList.add("visible");
-    return;
+    const formats = await BarcodeDetector.getSupportedFormats();
+    return Array.isArray(formats) && formats.includes("qr_code");
+  } catch {
+    return false;
   }
+}
 
-  const config = {
-    fps: 15,
-    qrbox: { width: 220, height: 220 },
+async function startNativeQrScanner() {
+  if (qrScannerRunning) return;
+
+  const container = document.getElementById("qr-reader");
+  if (!container) throw new Error("qr-reader missing");
+  clearElement(container);
+
+  const video = document.createElement("video");
+  video.id = "qr-native-video";
+  video.setAttribute("playsinline", "");
+  video.setAttribute("muted", "");
+  video.setAttribute("autoplay", "");
+  container.appendChild(video);
+  qrNativeVideo = video;
+
+  qrNativeDetector = new BarcodeDetector({ formats: ["qr_code"] });
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  qrNativeStream = stream;
+  video.srcObject = stream;
+  await video.play();
+
+  const tick = () => {
+    if (!qrNativeStream || !qrNativeVideo) return;
+    if (qrNativeInFlight) {
+      scheduleNext();
+      return;
+    }
+    if (qrNativeVideo.readyState < 2) {
+      scheduleNext();
+      return;
+    }
+    qrNativeInFlight = true;
+    qrNativeDetector.detect(qrNativeVideo)
+      .then((codes) => {
+        if (codes && codes.length > 0 && qrNativeStream) {
+          onQrScanned(codes[0].rawValue);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        qrNativeInFlight = false;
+        scheduleNext();
+      });
   };
 
-  html5QrCode.start(
+  const scheduleNext = () => {
+    if (!qrNativeStream) return;
+    if (qrNativeVideo && typeof qrNativeVideo.requestVideoFrameCallback === "function") {
+      qrNativeRafId = qrNativeVideo.requestVideoFrameCallback(tick);
+    } else {
+      qrNativeRafId = requestAnimationFrame(tick);
+    }
+  };
+
+  scheduleNext();
+}
+
+async function startHtml5QrScanner() {
+  if (qrScannerRunning) return;
+  if (typeof Html5Qrcode === "undefined") throw new Error("Html5Qrcode not loaded");
+
+  html5QrCode = new Html5Qrcode("qr-reader");
+
+  const config = {
+    fps: 30,
+    qrbox: (viewfinderWidth, viewfinderHeight) => {
+      const minDim = Math.min(viewfinderWidth, viewfinderHeight);
+      const size = Math.floor(minDim * 0.72);
+      return { width: size, height: size };
+    },
+    formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+    disableFlip: true,
+  };
+
+  await html5QrCode.start(
     { facingMode: "environment" },
     config,
     onQrScanned,
     (errorMessage) => { console.log("[QR] scan error:", errorMessage); }
-  ).then(() => {
-    qrScannerRunning = true;
-    console.log("[QR] camera started");
-  }).catch((err) => {
-    console.error("[QR] camera start failed:", err);
-    qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle.";
-    qrCameraError.style.display = "block";
-    qrManualSection.classList.add("visible");
-    html5QrCode = null;
-  });
+  );
 }
 
 function stopQrScanner() {
   if (html5QrCode && qrScannerRunning) {
     try {
       html5QrCode.stop().then(() => {
-        html5QrCode.clear();
+        try { html5QrCode.clear(); } catch {}
         qrScannerRunning = false;
-        console.log("[QR] camera stopped");
-      }).catch(() => {});
+      }).catch(() => { qrScannerRunning = false; });
     } catch (e) {
-      console.warn("[QR] stop error:", e);
+      qrScannerRunning = false;
     }
   }
+
+  if (qrNativeVideo && qrNativeRafId) {
+    try {
+      if (typeof qrNativeVideo.cancelVideoFrameCallback === "function") {
+        qrNativeVideo.cancelVideoFrameCallback(qrNativeRafId);
+      } else {
+        cancelAnimationFrame(qrNativeRafId);
+      }
+    } catch {}
+  }
+  qrNativeRafId = null;
+
+  if (qrNativeStream) {
+    try {
+      qrNativeStream.getTracks().forEach((t) => t.stop());
+    } catch {}
+    qrNativeStream = null;
+  }
+
+  if (qrNativeVideo) {
+    try { qrNativeVideo.srcObject = null; } catch {}
+    qrNativeVideo = null;
+  }
+
+  qrNativeDetector = null;
+  qrNativeInFlight = false;
+  setTorchOff();
+  if (qrFlashBtn) qrFlashBtn.style.display = "none";
   qrScannerRunning = false;
+}
+
+function setTorchButton(on) {
+  if (!qrFlashBtn) return;
+  qrFlashBtn.classList.toggle("on", on);
+  qrFlashBtn.textContent = on ? "💡 Flash : ON" : "💡 Flash";
+}
+
+function setTorchOff() {
+  if (!qrTorchOn) return;
+  qrTorchOn = false;
+  setTorchButton(false);
+  if (qrNativeStream) {
+    const track = qrNativeStream.getVideoTracks()[0];
+    if (track && track.getCapabilities && track.getCapabilities().torch) {
+      track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+    }
+  } else if (html5QrCode && qrScannerRunning) {
+    html5QrCode.applyVideoConstraints({ advanced: [{ torch: false }] }).catch(() => {});
+  }
+}
+
+async function toggleTorch() {
+  try {
+    const next = !qrTorchOn;
+    if (qrNativeStream) {
+      const track = qrNativeStream.getVideoTracks()[0];
+      if (!track || !track.getCapabilities || !track.getCapabilities().torch) {
+        showToast("Flashlight non supporté sur cet appareil");
+        return;
+      }
+      await track.applyConstraints({ advanced: [{ torch: next }] });
+    } else if (html5QrCode && qrScannerRunning) {
+      const caps = html5QrCode.getRunningTrackCapabilities ? html5QrCode.getRunningTrackCapabilities() : null;
+      if (!caps || !caps.torch) {
+        showToast("Flashlight non supporté sur cet appareil");
+        return;
+      }
+      await html5QrCode.applyVideoConstraints({ advanced: [{ torch: next }] });
+    } else {
+      showToast("Caméra non active");
+      return;
+    }
+    qrTorchOn = next;
+    setTorchButton(next);
+  } catch (err) {
+    console.warn("[torch] toggle failed:", err);
+    showToast("Flashlight non supporté sur cet appareil");
+    qrTorchOn = false;
+    setTorchButton(false);
+  }
+}
+
+function refreshFlashButton() {
+  if (!qrFlashBtn) return;
+  let supported = false;
+  if (qrNativeStream) {
+    const track = qrNativeStream.getVideoTracks()[0];
+    supported = !!(track && track.getCapabilities && track.getCapabilities().torch);
+  } else if (html5QrCode) {
+    try {
+      const caps = html5QrCode.getRunningTrackCapabilities ? html5QrCode.getRunningTrackCapabilities() : null;
+      supported = !!(caps && caps.torch);
+    } catch {
+      supported = false;
+    }
+  }
+  qrFlashBtn.style.display = qrScannerRunning && supported ? "block" : "none";
+  if (!supported) {
+    qrTorchOn = false;
+    setTorchButton(false);
+  }
 }
 
 function onQrScanned(decodedText) {
@@ -896,72 +1109,90 @@ async function verifyQrCode(qrId) {
 
 /* ===== End Payment Modal Functions ===== */
 
-async function verifierLocalisation() {
+function verifierLocalisation() {
     return new Promise((resolve) => {
         console.log("Attempting to get user location...");
-        
+
         if (!navigator.geolocation) {
             console.log("GPS non disponible");
             showToast("Geolocation is not supported by your browser");
             resolve(false);
             return;
         }
-        
-        console.log("Requesting user location...");
 
-        navigator.geolocation.getCurrentPosition(
-            async (position) => {
-                const latitude = position.coords.latitude;
-                const longitude = position.coords.longitude;
+        const MAX_RETRIES = 60;
+        let attempt = 0;
+        let waitingToastShown = false;
 
-                console.log("Latitude:", latitude);
-                console.log("Longitude:", longitude);
+        const tryGetPosition = () => {
+            attempt++;
+            console.log("Requesting user location... (attempt " + attempt + ")");
 
-                try {
-                    const response = await fetch("/verify-location", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        },
-                        body: JSON.stringify({
-                            latitude,
-                            longitude
-                        })
-                    });
+            navigator.geolocation.getCurrentPosition(
+                async (position) => {
+                    const latitude = position.coords.latitude;
+                    const longitude = position.coords.longitude;
 
-                    const data = await response.json();
-                    
-                    if (data.authorized) {
-                        resolve(true);
-                    } else {
-                        console.log("Position refusée par le serveur");
-                        showToast("Please entre to the coffe");
+                    console.log("Latitude:", latitude);
+                    console.log("Longitude:", longitude);
+
+                    try {
+                        const response = await fetch("/verify-location", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json"
+                            },
+                            body: JSON.stringify({
+                                latitude,
+                                longitude
+                            })
+                        });
+
+                        const data = await response.json();
+
+                        if (data.authorized) {
+                            resolve(true);
+                        } else {
+                            console.log("Position refusée par le serveur");
+                            showToast("Please entre to the coffe");
+                            resolve(false);
+                        }
+                    } catch (error) {
+                        console.log("Erreur serveur:", error);
+                        showToast("Server error during location verification");
                         resolve(false);
                     }
-                } catch (error) {
-                    console.log("Erreur serveur:", error);
-                    showToast("Server error during location verification");
-                    resolve(false);
+                },
+                (error) => {
+                    console.log("GPS refusé ou erreur:", error);
+
+                    if (error.code === 1) {
+                        showToast("Location is blocked. To confirm your order you must allow GPS access in your browser settings.");
+                        resolve(false);
+                        return;
+                    }
+
+                    if (!waitingToastShown) {
+                        waitingToastShown = true;
+                        showToast("En attente du GPS... Veuillez activer votre localisation.");
+                    }
+
+                    if (attempt < MAX_RETRIES) {
+                        setTimeout(tryGetPosition, 1500);
+                    } else {
+                        showToast("Unable to verify your location. Veuillez réessayer.");
+                        resolve(false);
+                    }
+                },
+                {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 0
                 }
-            },
-            (error) => {
-                console.log("GPS refusé ou erreur:", error);
-                let errorMessage = "Unable to verify location. ";
-                if (error.code === 1) {
-                    errorMessage += "To confirme your order you must allow GPS.";
-                } 
-                 else if (error.code === 3) {
-                    errorMessage += "Location request timeout.";
-                }
-                showToast(errorMessage);
-                resolve(false);
-            },
-            {
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 0
-            }
-        );
+            );
+        };
+
+        tryGetPosition();
     });
 }
 
@@ -1005,6 +1236,7 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
         if (qrClose) qrClose.addEventListener("click", hideQrModal);
         if (qrOverlay) qrOverlay.addEventListener("click", hideQrModal);
         if (qrVerifyBtn) qrVerifyBtn.addEventListener("click", () => verifyQrCode());
+        if (qrFlashBtn) qrFlashBtn.addEventListener("click", toggleTorch);
         if (qrInput) {
           qrInput.addEventListener("keydown", function (e) {
             if (e.key === "Enter") verifyQrCode();

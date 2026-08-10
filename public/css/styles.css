@@ -665,6 +665,36 @@ textarea{
 .qr-manual-toggle:hover {
   text-decoration: underline;
 }
+.qr-flash-btn {
+  display: block;
+  margin: 0 auto 8px;
+  padding: 8px 18px;
+  border: none;
+  border-radius: 20px;
+  background: #0d6efd;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.qr-flash-btn:hover {
+  background: #0b5ed7;
+}
+.qr-flash-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.qr-flash-btn.on {
+  background: #ffc107;
+  color: #1c1917;
+}
+#qr-native-video {
+  width: 280px;
+  max-width: 100%;
+  border-radius: 10px;
+  display: block;
+  margin: 0 auto 12px;
+}
 .qr-manual-fallback {
   display: none;
   margin-top: 10px;

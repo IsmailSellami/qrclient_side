@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>sellami menu</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+    <link rel="preconnect" href="https://i.postimg.cc">
     <link rel="stylesheet" href="css/styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@1.2.3/minified/html5-qrcode.min.js"></script>
 
 </head>
 <body   class="body">
@@ -93,6 +94,7 @@
   </div>
   <div class="modal__body">
     <div id="qr-reader"></div>
+    <button id="qrFlashBtn" class="qr-flash-btn" type="button" style="display:none;">💡 Flash</button>
     <div id="qrManualToggle" class="qr-manual-toggle">Saisir manuellement</div>
     <div id="qrManualSection" class="qr-manual-fallback">
       <input id="qrInput" class="qr-input" type="text" placeholder="Identifiant de la carte..." autocomplete="off" />
@@ -118,6 +120,6 @@
   </div>
 </div>
 
-       <script  src="js/script.js"></script>
+       <script  defer src="js/script.js"></script>
 </body>
 </html>
