@@ -30,6 +30,7 @@ const qrManualToggle = document.getElementById("qrManualToggle");
 const qrManualSection = document.getElementById("qrManualSection");
 const qrCameraError = document.getElementById("qrCameraError");
 const qrFlashBtn = document.getElementById("qrFlashBtn");
+const qrRetryBtn = document.getElementById("qrRetryBtn");
 
 let html5QrCode = null;
 let qrScannerRunning = false;
@@ -689,6 +690,7 @@ function showQrModal() {
   qrTorchOn = false;
   setTorchButton(false);
   if (qrFlashBtn) qrFlashBtn.style.display = "none";
+  if (qrRetryBtn) qrRetryBtn.style.display = "none";
   setModal(qrModal, qrOverlay, true);
 }
 
@@ -721,6 +723,7 @@ function startQrScanner() {
           await startNativeQrScanner();
         } catch (nativeErr) {
           console.warn("[QR] native path failed, falling back to html5:", nativeErr);
+          await loadHtml5QrcodeLib();
           await startHtml5QrScanner();
         }
       } else {
@@ -735,6 +738,7 @@ function startQrScanner() {
       const detail = (err && err.message) ? " (" + err.message + ")" : "";
       qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle." + detail;
       qrCameraError.style.display = "block";
+      if (qrRetryBtn) qrRetryBtn.style.display = "block";
       qrManualSection.classList.add("visible");
       stopQrScanner();
     } finally {
@@ -761,8 +765,29 @@ function loadHtml5QrcodeLib() {
   return html5QrcodeLibPromise;
 }
 
+async function requestCameraStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("Caméra non disponible (connexion non sécurisée ou navigateur non supporté)");
+  }
+  const attempts = [
+    { video: { facingMode: { ideal: "environment" } }, audio: false },
+    { video: true, audio: false },
+  ];
+  let lastErr = null;
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      lastErr = err;
+      console.warn("[QR] getUserMedia attempt failed:", JSON.stringify(constraints), err && err.name, err && err.message);
+    }
+  }
+  throw lastErr || new Error("Camera access denied");
+}
+
 async function isNativeQrSupported() {
   if (typeof window === "undefined" || !("BarcodeDetector" in window)) return false;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
   try {
     const formats = await BarcodeDetector.getSupportedFormats();
     return Array.isArray(formats) && formats.includes("qr_code");
@@ -788,10 +813,7 @@ async function startNativeQrScanner() {
 
   qrNativeDetector = new BarcodeDetector({ formats: ["qr_code"] });
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false,
-  });
+  const stream = await requestCameraStream();
   qrNativeStream = stream;
   video.srcObject = stream;
   await video.play();
@@ -855,7 +877,7 @@ async function startHtml5QrScanner() {
   };
 
   await html5QrCode.start(
-    { facingMode: "environment" },
+    { facingMode: { ideal: "environment" } },
     config,
     onQrScanned,
     (errorMessage) => { console.log("[QR] scan error:", errorMessage); }
@@ -1248,6 +1270,13 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
         if (qrOverlay) qrOverlay.addEventListener("click", hideQrModal);
         if (qrVerifyBtn) qrVerifyBtn.addEventListener("click", () => verifyQrCode());
         if (qrFlashBtn) qrFlashBtn.addEventListener("click", toggleTorch);
+        if (qrRetryBtn) {
+          qrRetryBtn.addEventListener("click", function () {
+            if (qrRetryBtn) qrRetryBtn.style.display = "none";
+            qrCameraError.style.display = "none";
+            startQrScanner();
+          });
+        }
         if (qrInput) {
           qrInput.addEventListener("keydown", function (e) {
             if (e.key === "Enter") verifyQrCode();
