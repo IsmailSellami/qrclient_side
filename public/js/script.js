@@ -717,7 +717,12 @@ function startQrScanner() {
   qrStartPromise = (async () => {
     try {
       if (await isNativeQrSupported()) {
-        await startNativeQrScanner();
+        try {
+          await startNativeQrScanner();
+        } catch (nativeErr) {
+          console.warn("[QR] native path failed, falling back to html5:", nativeErr);
+          await startHtml5QrScanner();
+        }
       } else {
         await loadHtml5QrcodeLib();
         await startHtml5QrScanner();
@@ -727,7 +732,8 @@ function startQrScanner() {
       refreshFlashButton();
     } catch (err) {
       console.error("[QR] camera start failed:", err);
-      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle.";
+      const detail = (err && err.message) ? " (" + err.message + ")" : "";
+      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle." + detail;
       qrCameraError.style.display = "block";
       qrManualSection.classList.add("visible");
       stopQrScanner();
@@ -790,18 +796,20 @@ async function startNativeQrScanner() {
   video.srcObject = stream;
   await video.play();
 
-  const tick = () => {
-    if (!qrNativeStream || !qrNativeVideo) return;
-    if (qrNativeInFlight) {
-      scheduleNext();
-      return;
-    }
-    if (qrNativeVideo.readyState < 2) {
-      scheduleNext();
-      return;
-    }
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  const drawAndDetect = () => {
+    if (!qrNativeStream || !qrNativeVideo || qrNativeInFlight) { scheduleNext(); return; }
+    if (qrNativeVideo.readyState < 2) { scheduleNext(); return; }
+    const vw = qrNativeVideo.videoWidth;
+    const vh = qrNativeVideo.videoHeight;
+    if (!vw || !vh) { scheduleNext(); return; }
+    canvas.width = Math.min(640, vw);
+    canvas.height = Math.max(1, Math.round(canvas.width * vh / vw));
+    ctx.drawImage(qrNativeVideo, 0, 0, canvas.width, canvas.height);
     qrNativeInFlight = true;
-    qrNativeDetector.detect(qrNativeVideo)
+    qrNativeDetector.detect(canvas)
       .then((codes) => {
         if (codes && codes.length > 0 && qrNativeStream) {
           onQrScanned(codes[0].rawValue);
@@ -817,9 +825,9 @@ async function startNativeQrScanner() {
   const scheduleNext = () => {
     if (!qrNativeStream) return;
     if (qrNativeVideo && typeof qrNativeVideo.requestVideoFrameCallback === "function") {
-      qrNativeRafId = qrNativeVideo.requestVideoFrameCallback(tick);
+      qrNativeRafId = qrNativeVideo.requestVideoFrameCallback(drawAndDetect);
     } else {
-      qrNativeRafId = requestAnimationFrame(tick);
+      qrNativeRafId = requestAnimationFrame(drawAndDetect);
     }
   };
 
@@ -829,6 +837,9 @@ async function startNativeQrScanner() {
 async function startHtml5QrScanner() {
   if (qrScannerRunning) return;
   if (typeof Html5Qrcode === "undefined") throw new Error("Html5Qrcode not loaded");
+
+  const container = document.getElementById("qr-reader");
+  if (container) clearElement(container);
 
   html5QrCode = new Html5Qrcode("qr-reader");
 
