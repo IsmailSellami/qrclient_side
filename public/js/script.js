@@ -770,7 +770,7 @@ async function requestCameraStream() {
     throw new Error("Caméra non disponible (connexion non sécurisée ou navigateur non supporté)");
   }
   const attempts = [
-    { video: { facingMode: { ideal: "environment" } }, audio: false },
+    { video: { facingMode: "environment" }, audio: false },
     { video: true, audio: false },
   ];
   let lastErr = null;
@@ -877,7 +877,7 @@ async function startHtml5QrScanner() {
   };
 
   await html5QrCode.start(
-    { facingMode: { ideal: "environment" } },
+    { facingMode: "environment" },
     config,
     onQrScanned,
     (errorMessage) => { console.log("[QR] scan error:", errorMessage); }
