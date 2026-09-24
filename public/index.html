@@ -73,6 +73,7 @@
       <span>Total à payer :</span>
       <span id="paymentTotalAmount"></span>
     </div>
+    <div id="paymentLoyaltyReward" class="payment-loyalty-reward" style="display:none;"></div>
     <div class="payment-options">
       <button id="payCard" class="btn payment-btn payment-btn--card">
         <span class="payment-btn__icon">&#128179;</span>
@@ -95,12 +96,10 @@
   <div class="modal__body">
     <div id="qr-reader"></div>
     <button id="qrFlashBtn" class="qr-flash-btn" type="button" style="display:none;">💡 Flash</button>
-    <div id="qrManualToggle" class="qr-manual-toggle">Saisir manuellement</div>
-    <div id="qrManualSection" class="qr-manual-fallback">
-      <input id="qrInput" class="qr-input" type="text" placeholder="Identifiant de la carte..." autocomplete="off" />
-      <button id="qrVerifyBtn" class="btn btn--primary qr-verify-btn" type="button">Vérifier</button>
-    </div>
     <div id="qrResult" class="qr-result" aria-hidden="true"></div>
+    <div id="loyaltyInfo" class="loyalty-info" style="display:none;"></div>
+    <div id="rewardSelection" class="reward-selection" style="display:none;"></div>
+    <button id="confirmPaymentBtn" class="btn btn--primary qr-verify-btn" type="button" style="display:none;">Confirmer le paiement</button>
     <div id="qrCameraError" class="qr-result error" aria-hidden="true" style="display:none;"></div>
     <button id="qrRetryBtn" class="btn btn--primary qr-retry-btn" type="button" style="display:none;">Réessayer</button>
   </div>

@@ -23,11 +23,7 @@ const payCashBtn = document.getElementById("payCash");
 const qrOverlay = document.getElementById("qrOverlay");
 const qrModal = document.getElementById("qrModal");
 const qrClose = document.getElementById("qrClose");
-const qrInput = document.getElementById("qrInput");
-const qrVerifyBtn = document.getElementById("qrVerifyBtn");
 const qrResult = document.getElementById("qrResult");
-const qrManualToggle = document.getElementById("qrManualToggle");
-const qrManualSection = document.getElementById("qrManualSection");
 const qrCameraError = document.getElementById("qrCameraError");
 const qrFlashBtn = document.getElementById("qrFlashBtn");
 const qrRetryBtn = document.getElementById("qrRetryBtn");
@@ -49,12 +45,23 @@ const cashOk = document.getElementById("cashOk");
 
 const discountBanner = document.getElementById("discountBanner");
 const paymentTotalAmount = document.getElementById("paymentTotalAmount");
+const paymentLoyaltyReward = document.getElementById("paymentLoyaltyReward");
+const loyaltyInfoEl = document.getElementById("loyaltyInfo");
+const rewardSelectionEl = document.getElementById("rewardSelection");
+const confirmPaymentBtn = document.getElementById("confirmPaymentBtn");
 
 let lastOrderIdrecu = null;
 let lastOrderTotal = 0;
 let activePromotion = null;
 let pendingOrderItems = null;
 let pendingOrderTotal = 0;
+
+let loyaltyConfig = null;
+let loyaltyCustomerInfo = null;
+let selectedRewardId = null;
+let selectedRewardDiscount = 0;
+let selectedFreeOption = null;
+let pendingQrId = null;
 
 const PROMOTION_CACHE_TTL = 60000;
 let promotionCache = { data: null, ts: 0 };
@@ -66,7 +73,7 @@ const caractereImg = document.getElementById("caractereImg");
 const caractereOptions = document.getElementById("caractereOptions");
 const promotionBanner = document.getElementById("promotionBanner");
 const params = new URLSearchParams(window.location.search);
-const numtable = Number(params.get("table")) || 45;
+const numtable = Number(params.get("table")) || 60;
 
 console.log("TABLE =", numtable);
 let selectedCategory = "Tous";
@@ -141,6 +148,15 @@ function getProductKey(product) {
 function safeNumber(value) {
     const n = typeof value === "number" ? value : parseFloat(String(value ?? "").replace(",", "."));
     return Number.isFinite(n) ? n : 0;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 function showToast(message) {
@@ -433,17 +449,26 @@ function renderCategoryButtons() {
     (initialBtn || btns[0])?.classList.add("active");
 }
 
+function isDisplayableProduct(p) {
+    if (p == null) return false;
+    const price = Number(p.price);
+    if (isNaN(price) || price === 0) return false;
+    const img = p && p.img;
+    return !(img === null || img === undefined || String(img).trim() === "");
+}
+
 function renderProducts() {
     clearElement(productContainer);
 
     const q = String(searchQuery || "").trim().toLowerCase();
+    const visibleProducts = products.filter(isDisplayableProduct);
     const filteredProducts = q
-        ? products.filter((p) => {
+        ? visibleProducts.filter((p) => {
               const name = normalizeCategoryName(p.idname).toLowerCase();
               const cat = normalizeCategoryName(p.idcat).toLowerCase();
               return name.includes(q) || cat.includes(q);
           })
-        : products;
+        : visibleProducts;
 
     if (isAllCategory(selectedCategory)) {
         titleEl.textContent = "";
@@ -597,6 +622,72 @@ function getDiscountedTotal(originalTotal, discountPercent) {
   return Math.round(originalTotal * (100 - discountPercent) / 100 * 1000) / 1000;
 }
 
+// Format a loyalty point value to a maximum of 2 decimal places (e.g. 12.00008
+// -> "12", 15.4177777773 -> "15.42"). Trailing zeros are dropped.
+function formatPoints(n) {
+  const num = Number(n);
+  if (!isFinite(num)) return '0';
+  return String(Math.round((num + Number.EPSILON) * 100) / 100);
+}
+
+function getCartItemPrice(idname) {
+  const found = cart.find(i => String(i.name) === String(idname));
+  return found ? safeNumber(found.price) : 0;
+}
+
+function getSelectedReward() {
+  if (!selectedRewardId) return null;
+  return (loyaltyCustomerInfo?.rewards || []).find(r => !r.isRedeemed && String(r.id) === String(selectedRewardId)) || null;
+}
+
+function getFreeItemIdname() {
+  const r = getSelectedReward();
+  return (r && r.rewardType === 'free_item' && r.productId) ? String(r.productId) : null;
+}
+
+// Full list of lines sent to the backend: the paid cart lines PLUS the
+// free product (auto-added as a real order line so the serveur receives it).
+// The free item carries its chosen option and is written at 0.00 DT.
+function getOrderItems() {
+  const base = Array.isArray(pendingOrderItems) ? pendingOrderItems : [];
+  const freeName = getFreeItemIdname();
+  if (!freeName) return base;
+
+  const exists = base.some(it => String(it.idname) === freeName);
+  if (exists) {
+    return base.map(it => String(it.idname) === freeName
+      ? { ...it, optionn: selectedFreeOption || it.optionn || null }
+      : it);
+  }
+  return [...base, { idname: freeName, optionn: selectedFreeOption || null, free: true }];
+}
+
+// Base (undiscounted) total of the items that will actually be charged,
+// excluding any free product granted by the selected reward.
+function getOrderBaseTotal() {
+  const freeName = getFreeItemIdname();
+  if (!freeName) return pendingOrderTotal;
+  return (pendingOrderItems || [])
+    .filter(it => String(it.idname) !== freeName)
+    .reduce((sum, it) => sum + (getCartItemPrice(it.idname) || 0), 0);
+}
+
+// Single source of truth for the final payable amount.
+// A discount reward REPLACES any active promotion (they are never combined).
+function computeFinalTotal(baseTotal) {
+  if (selectedRewardId && selectedRewardDiscount > 0) {
+    return getDiscountedTotal(baseTotal, selectedRewardDiscount);
+  }
+  if (activePromotion && activePromotion.active) {
+    return getDiscountedTotal(baseTotal, activePromotion.discountPercent);
+  }
+  return baseTotal;
+}
+
+function getEffectivePaymentTotal() {
+  return computeFinalTotal(getOrderBaseTotal());
+}
+
 async function loadPromotionBanner() {
   if (!promotionBanner) return;
   try {
@@ -635,6 +726,181 @@ function updatePaymentTotalDisplay(originalTotal, discountPercent) {
   } else {
     paymentTotalAmount.textContent = `${originalTotal.toFixed(3)} DT`;
   }
+}
+
+async function loadLoyaltyConfig() {
+  try {
+    const res = await fetch('/api/loyalty/public/config');
+    if (!res.ok) return null;
+    const data = await res.json();
+    loyaltyConfig = data;
+    return data;
+  } catch (e) {
+    console.error('Failed to load loyalty config:', e);
+    return null;
+  }
+}
+
+function renderLoyaltyInfo(info) {
+  if (!loyaltyInfoEl || !info) return;
+  loyaltyInfoEl.innerHTML = '';
+  loyaltyInfoEl.style.display = 'block';
+
+  const card = info.card || {};
+  const tier = info.tier;
+  const nextTier = info.nextTier;
+  const lifetime = Number(card.lifetimePoints || card.points || 0);
+  const currentPoints = Number(card.points || 0);
+
+  let progressHtml = '';
+  if (nextTier) {
+    const prevMin = tier ? Number(tier.minPoints) : 0;
+    const nextMin = Number(nextTier.minPoints);
+    const range = nextMin - prevMin;
+    const progress = range > 0 ? Math.min(100, Math.round((lifetime - prevMin) / range * 100)) : 0;
+    progressHtml = `
+      <div class="loyalty-progress">
+        <div class="loyalty-progress__label">
+          <span>${tier ? tier.name : 'Débutant'}</span>
+          <span>${nextTier.name} (${nextMin} pts)</span>
+        </div>
+        <div class="loyalty-progress__bar">
+          <div class="loyalty-progress__fill" style="width:${progress}%;background:${tier ? (tier.color || '#c49b63') : '#c49b63'}"></div>
+        </div>
+        <div class="loyalty-progress__detail">${formatPoints(lifetime)} / ${nextMin} points</div>
+      </div>`;
+  } else {
+    progressHtml = `
+      <div class="loyalty-progress">
+        <div class="loyalty-progress__label"><span>${tier ? tier.name : 'Niveau maximal'}</span></div>
+        <div class="loyalty-progress__detail">${formatPoints(lifetime)} points cumulés — Niveau maximal atteint !</div>
+      </div>`;
+  }
+
+  const tierBadgeHtml = tier
+    ? `<span class="loyalty-tier-badge" style="background:${tier.color || '#c49b63'}">${tier.icon || '⭐'} ${tier.name}</span>`
+    : `<span class="loyalty-tier-badge loyalty-tier-badge--default">⭐ Débutant</span>`;
+
+  loyaltyInfoEl.innerHTML = `
+    <div class="loyalty-info__header">
+      ${tierBadgeHtml}
+      <div class="loyalty-info__name">${card.name || 'Client'}</div>
+    </div>
+    <div class="loyalty-info__points">
+      <span class="loyalty-info__points-value">${formatPoints(currentPoints)}</span>
+      <span class="loyalty-info__points-label">points disponibles</span>
+    </div>
+    ${progressHtml}
+  `;
+}
+
+function renderRewardSelection(configRewards, earnedRewards) {
+  if (!rewardSelectionEl) return;
+  rewardSelectionEl.innerHTML = '';
+  rewardSelectionEl.style.display = 'none';
+  selectedRewardId = null;
+  selectedRewardDiscount = 0;
+  selectedFreeOption = null;
+
+  if (!earnedRewards || earnedRewards.length === 0) return;
+
+  const available = earnedRewards.filter(r => !r.isRedeemed);
+  if (available.length === 0) return;
+
+  rewardSelectionEl.style.display = 'block';
+
+  const hasPromotion = !!(activePromotion && activePromotion.active);
+
+  const cardsHtml = available.map(r => {
+    let typeLabel = 'Récompense';
+    if (r.rewardType === 'discount') typeLabel = `-${r.discountPercent}% de réduction`;
+    else if (r.rewardType === 'free_item') typeLabel = r.productId ? `Article gratuit : ${r.productId} (0.00 DT)` : 'Article gratuit';
+    const note = (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0)
+      ? `<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`
+      : '';
+    return `
+      <div class="reward-card" data-reward-id="${r.id}">
+        <div class="reward-card__name">${r.rewardName || r.name || 'Récompense'}</div>
+        <div class="reward-card__type">${typeLabel}</div>
+        ${r.mysteryResult ? `<div class="reward-card__mystery">${r.mysteryResult}</div>` : ''}
+      </div>
+      ${note}`;
+  }).join('');
+
+  rewardSelectionEl.innerHTML = `
+    <div class="reward-selection__title">🎁 Récompenses disponibles</div>
+    <div class="reward-selection__hint">Sélectionnez une récompense à appliquer (optionnel)</div>
+    <div class="reward-selection__list">${cardsHtml}</div>
+    <div id="rewardFreeOptions" class="reward-free-options" style="display:none;"></div>
+  `;
+
+  const freeOptionsEl = rewardSelectionEl.querySelector('#rewardFreeOptions');
+
+  function renderFreeOptionPicker(info) {
+    if (!freeOptionsEl) return;
+    selectedFreeOption = null;
+    const freeName = info?.productId ? String(info.productId) : null;
+    if (!freeName) { freeOptionsEl.style.display = 'none'; freeOptionsEl.innerHTML = ''; return; }
+
+    // The client types their own choice for a free reward — we do NOT show the
+    // categories/articles as selectable products. The typed text is stored directly
+    // in orderr.option on confirmation.
+    freeOptionsEl.style.display = 'block';
+    freeOptionsEl.innerHTML = `
+      <div class="reward-free-options__hint">Article gratuit : <strong>${freeName}</strong> (0.00 DT)</div>
+      <label class="reward-free-options__label" for="rewardFreeChoice">Votre choix :</label>
+      <textarea id="rewardFreeChoice" class="reward-free-options__textarea" rows="2" placeholder="Cappuccino, Express, etc."></textarea>
+    `;
+    const textarea = freeOptionsEl.querySelector('#rewardFreeChoice');
+    textarea.addEventListener('input', () => {
+      selectedFreeOption = textarea.value && String(textarea.value).trim() !== '' ? String(textarea.value).trim() : null;
+      refreshConfirmButton();
+    });
+    refreshConfirmButton();
+  }
+
+  rewardSelectionEl.querySelectorAll('.reward-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const wasSelected = card.classList.contains('selected');
+      rewardSelectionEl.querySelectorAll('.reward-card').forEach(c => c.classList.remove('selected'));
+      if (wasSelected) {
+        selectedRewardId = null;
+        selectedRewardDiscount = 0;
+        selectedFreeOption = null;
+        if (freeOptionsEl) { freeOptionsEl.style.display = 'none'; freeOptionsEl.innerHTML = ''; }
+      } else {
+        card.classList.add('selected');
+        selectedRewardId = card.dataset.rewardId;
+        const info = available.find(r => String(r.id) === String(card.dataset.rewardId));
+        selectedRewardDiscount = info && info.rewardType === 'discount' ? Number(info.discountPercent || 0) : 0;
+        selectedFreeOption = null;
+        if (info && info.rewardType === 'free_item') {
+          renderFreeOptionPicker(info);
+        } else if (freeOptionsEl) {
+          freeOptionsEl.style.display = 'none';
+          freeOptionsEl.innerHTML = '';
+        }
+      }
+      refreshConfirmButton();
+    });
+  });
+}
+
+function refreshConfirmButton() {
+  if (!confirmPaymentBtn) return;
+  const eff = getEffectivePaymentTotal();
+  confirmPaymentBtn.textContent = `Confirmer le paiement — ${eff.toFixed(3)} DT`;
+}
+
+function resetLoyaltyUI() {
+  if (loyaltyInfoEl) { loyaltyInfoEl.style.display = 'none'; loyaltyInfoEl.innerHTML = ''; }
+  if (rewardSelectionEl) { rewardSelectionEl.style.display = 'none'; rewardSelectionEl.innerHTML = ''; }
+  if (confirmPaymentBtn) confirmPaymentBtn.style.display = 'none';
+  selectedRewardId = null;
+  selectedRewardDiscount = 0;
+  selectedFreeOption = null;
+  pendingQrId = null;
+  loyaltyCustomerInfo = null;
 }
 
 async function showPaymentModal() {
@@ -685,19 +951,18 @@ function showQrModal() {
   qrResult.style.display = "none";
   qrCameraError.style.display = "none";
   qrCameraError.textContent = "";
-  qrInput.value = "";
-  qrManualSection.classList.remove("visible");
   qrTorchOn = false;
   setTorchButton(false);
   if (qrFlashBtn) qrFlashBtn.style.display = "none";
   if (qrRetryBtn) qrRetryBtn.style.display = "none";
+  resetLoyaltyUI();
   setModal(qrModal, qrOverlay, true);
 }
 
 function hideQrModal() {
   stopQrScanner();
-  qrManualSection.classList.remove("visible");
   setModal(qrModal, qrOverlay, false);
+  resetLoyaltyUI();
   pendingOrderItems = null;
   pendingOrderTotal = 0;
 }
@@ -736,10 +1001,9 @@ function startQrScanner() {
     } catch (err) {
       console.error("[QR] camera start failed:", err);
       const detail = (err && err.message) ? " (" + err.message + ")" : "";
-      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations ou utilisez la saisie manuelle." + detail;
+      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations." + detail;
       qrCameraError.style.display = "block";
       if (qrRetryBtn) qrRetryBtn.style.display = "block";
-      qrManualSection.classList.add("visible");
       stopQrScanner();
     } finally {
       qrStartPromise = null;
@@ -1035,75 +1299,118 @@ function extractToken(input) {
 }
 
 async function verifyQrCode(qrId) {
-    console.log(qrId);
-    console.log('Verifying QR code:', !qrId);
-  if (!qrId) {
-    qrId = extractToken(qrInput.value);
-  } else {
-    qrId = extractToken(qrId);
-  }
+  qrId = extractToken(qrId);
   if (!qrId) {
     qrResult.className = "qr-result error";
-    qrResult.textContent = "Veuillez saisir un identifiant valide.";
+    qrResult.textContent = "Aucun QR code détecté. Veuillez scanner la carte.";
     qrResult.style.display = "block";
     qrCameraError.style.display = "none";
-    qrVerifyBtn.disabled = false;
     return;
   }
 
   qrResult.className = "qr-result loading";
   qrResult.textContent = "Vérification en cours...";
   qrResult.style.display = "block";
-  qrVerifyBtn.disabled = true;
-
-  const paymentTotal = activePromotion && activePromotion.active
-    ? getDiscountedTotal(pendingOrderTotal, activePromotion.discountPercent)
-    : pendingOrderTotal;
+  resetLoyaltyUI();
 
   try {
-    const res = await fetch("/verify-qr", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ qrId, total: paymentTotal })
-    });
+    const tokenRes = await fetch(`/api/loyalty/token/${qrId}`);
+    const tokenData = await tokenRes.json();
 
-    const data = await res.json();
-
-    if (!data.success) {
-      if (data.error === "CUSTOMER_NOT_FOUND") {
-        qrResult.className = "qr-result error";
-        qrResult.textContent = "Client introuvable. Veuillez réessayer ou contacter le gérant.";
-      } else if (data.error === "INSUFFICIENT_POINTS") {
-        qrResult.className = "qr-result error";
-        qrResult.textContent = "Points insuffisants. Veuillez recharger votre carte.";
-      } else {
-        qrResult.className = "qr-result error";
-        qrResult.textContent = "Erreur de vérification. Veuillez réessayer.";
-      }
+    if (!tokenRes.ok || !tokenData.points && tokenData.points !== 0) {
+      qrResult.className = "qr-result error";
+      qrResult.textContent = tokenData.error === "NOT_FOUND"
+        ? "Client introuvable. Veuillez réessayer ou contacter le gérant."
+        : "Erreur de vérification. Veuillez réessayer.";
       qrResult.style.display = "block";
       qrCameraError.style.display = "none";
       return;
     }
 
-    let displayMessage = "";
-    if (data.discount) {
-      displayMessage = `Réduction de ${data.discount.percent}% appliquée ! (${data.discount.originalTotal.toFixed(3)} DT → ${data.discount.discountedTotal.toFixed(3)} DT)\n`;
+    // Load customer loyalty info + earned rewards BEFORE the points check so we
+    // can factor an available discount reward into the affordable total.
+    try {
+      const loyaltyRes = await fetch(`/api/loyalty/public/customer/${qrId}`);
+      if (loyaltyRes.ok) {
+        loyaltyCustomerInfo = await loyaltyRes.json();
+      }
+    } catch (e) {
+      console.warn("Could not load loyalty info:", e);
     }
 
-    qrResult.className = "qr-result loading";
-    qrResult.textContent = "Création de la commande...";
-    qrResult.style.display = "block";
+    // Best-case total the customer could reach with their best available discount
+    // reward. A discount reward REPLACES any active promotion (never combined).
+    const availDiscount = (loyaltyCustomerInfo?.rewards || [])
+      .filter(r => !r.isRedeemed && r.rewardType === 'discount' && Number(r.discountPercent || 0) > 0)
+      .reduce((best, r) => Math.max(best, Number(r.discountPercent)), 0);
+    const rewardAwareTotal = availDiscount > 0
+      ? getDiscountedTotal(pendingOrderTotal, availDiscount)
+      : (activePromotion && activePromotion.active
+          ? getDiscountedTotal(pendingOrderTotal, activePromotion.discountPercent)
+          : pendingOrderTotal);
 
-    await submitOrderToBackend();
+    if (tokenData.points < rewardAwareTotal) {
+      qrResult.className = "qr-result error";
+      qrResult.textContent = `Points insuffisants. Solde: ${formatPoints(tokenData.points)} DT, Total: ${rewardAwareTotal.toFixed(3)} DT. Veuillez recharger votre carte.`;
+      qrResult.style.display = "block";
+      qrCameraError.style.display = "none";
+      return;
+    }
+
+    pendingQrId = qrId;
+    qrResult.className = "qr-result success";
+    qrResult.textContent = "Carte vérifiée !";
+    qrResult.style.display = "block";
+    qrCameraError.style.display = "none";
+
+    if (loyaltyCustomerInfo) {
+      renderLoyaltyInfo(loyaltyCustomerInfo);
+      renderRewardSelection(loyaltyConfig?.rewards || [], loyaltyCustomerInfo?.rewards || []);
+    }
+
+    if (confirmPaymentBtn) {
+      confirmPaymentBtn.textContent = `Confirmer le paiement — ${getEffectivePaymentTotal().toFixed(3)} DT`;
+      confirmPaymentBtn.style.display = "block";
+    }
+
+  } catch (err) {
+    console.error(err);
+    qrResult.className = "qr-result error";
+    qrResult.textContent = "Erreur de connexion. Veuillez réessayer.";
+    qrResult.style.display = "block";
+  }
+}
+
+async function processCardPaymentWithReward() {
+  if (!pendingQrId) return;
+
+  const orderItems = getOrderItems();
+  const orderBaseTotal = getOrderBaseTotal();
+  const displayTotal = computeFinalTotal(orderBaseTotal);
+
+  if (confirmPaymentBtn) confirmPaymentBtn.disabled = true;
+  qrResult.textContent = "Traitement du paiement en cours...";
+  qrResult.style.display = "block";
+
+  try {
+    const body = {
+      qrId: pendingQrId,
+      numtable,
+      items: orderItems,
+      total: orderBaseTotal
+    };
+    if (selectedRewardId) {
+      body.rewardId = selectedRewardId;
+    }
 
     const payRes = await fetch("/process-card-payment", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ qrId, idrecu: lastOrderIdrecu, total: paymentTotal })
+      body: JSON.stringify(body)
     });
 
     const payData = await payRes.json();
-    console.log(payData);
+
     if (!payData.success) {
       qrResult.className = "qr-result error";
       if (payData.error === "INSUFFICIENT_POINTS") {
@@ -1112,14 +1419,35 @@ async function verifyQrCode(qrId) {
         qrResult.textContent = "Erreur de paiement. Veuillez réessayer.";
       }
       qrResult.style.display = "block";
-      qrCameraError.style.display = "none";
       return;
     }
 
+    let earnedPoints = 0;
+    if (loyaltyCustomerInfo && loyaltyCustomerInfo.card) {
+      const oldPoints = Number(loyaltyCustomerInfo.card.points || 0);
+      const newPoints = Math.max(0, oldPoints - displayTotal);
+      earnedPoints = displayTotal;
+    }
+
     qrResult.className = "qr-result success";
-    qrResult.textContent = displayMessage + "Paiement réussi ! Merci de votre visite.";
+    qrResult.innerHTML = `Paiement réussi ! Merci de votre visite.`;
     qrResult.style.display = "block";
-    qrCameraError.style.display = "none";
+
+    if (loyaltyCustomerInfo && loyaltyCustomerInfo.card) {
+      const newBalance = Math.max(0, Number(loyaltyCustomerInfo.card.points || 0) - displayTotal);
+      const loyaltySummary = document.createElement('div');
+      loyaltySummary.className = 'loyalty-summary';
+      loyaltySummary.innerHTML = `
+        <div class="loyalty-summary__row">
+          <span>Débit:</span><span>-${formatPoints(displayTotal)} DT</span>
+        </div>
+        <div class="loyalty-summary__row">
+          <span>Nouveau solde:</span><span>${formatPoints(newBalance)} DT</span>
+        </div>
+        ${selectedRewardId ? '<div class="loyalty-summary__reward">🎁 Récompense appliquée</div>' : ''}
+      `;
+      qrResult.appendChild(loyaltySummary);
+    }
 
     cart = [];
     pendingOrderItems = null;
@@ -1129,14 +1457,14 @@ async function verifyQrCode(qrId) {
 
     setTimeout(() => {
       hideQrModal();
-    }, 2500);
+    }, 3000);
   } catch (err) {
     console.error(err);
     qrResult.className = "qr-result error";
     qrResult.textContent = "Erreur de connexion. Veuillez réessayer.";
     qrResult.style.display = "block";
   } finally {
-    qrVerifyBtn.disabled = false;
+    if (confirmPaymentBtn) confirmPaymentBtn.disabled = false;
   }
 }
 
@@ -1268,30 +1596,13 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
         // QR modal events
         if (qrClose) qrClose.addEventListener("click", hideQrModal);
         if (qrOverlay) qrOverlay.addEventListener("click", hideQrModal);
-        if (qrVerifyBtn) qrVerifyBtn.addEventListener("click", () => verifyQrCode());
+        if (confirmPaymentBtn) confirmPaymentBtn.addEventListener("click", processCardPaymentWithReward);
         if (qrFlashBtn) qrFlashBtn.addEventListener("click", toggleTorch);
         if (qrRetryBtn) {
           qrRetryBtn.addEventListener("click", function () {
             if (qrRetryBtn) qrRetryBtn.style.display = "none";
             qrCameraError.style.display = "none";
             startQrScanner();
-          });
-        }
-        if (qrInput) {
-          qrInput.addEventListener("keydown", function (e) {
-            if (e.key === "Enter") verifyQrCode();
-          });
-        }
-        if (qrManualToggle) {
-          qrManualToggle.addEventListener("click", function () {
-            const isVisible = qrManualSection.classList.toggle("visible");
-            this.textContent = isVisible ? "Scanner avec la caméra" : "Saisir manuellement";
-            if (isVisible) {
-              stopQrScanner();
-              setTimeout(() => qrInput.focus(), 100);
-            } else {
-              startQrScanner();
-            }
           });
         }
 
@@ -1324,6 +1635,7 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
         renderProducts();
         renderCart();
         loadPromotionBanner();
+        loadLoyaltyConfig();
     })
     .catch(() => {
         // on fetch failure keep persisted data and attempt to derive categories from persisted products
