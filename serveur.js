@@ -8,6 +8,7 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
+import crypto from 'crypto';
 
 const { Client } = pg;
 
@@ -566,6 +567,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
 }
 
 app.post("/verify-location", (_req, res) => {
+  console.log('Verifying location...');
   return res.json({ authorized: true });
 });
 
@@ -687,6 +689,30 @@ app.post('/verify-qr', paymentLimiter, async (req, res) => {
   }
 });
 
+// Fire-and-forget WhatsApp confirmation for a loyalty points deduction.
+// Mirrors serveur's notifyClient(): INSERTs a pending row into the shared
+// `notifications` table that the whatssup Baileys worker drains over WhatsApp.
+// Never blocks or fails the payment flow; errors are logged only.
+function notifyPointsDeduction(cardId, customerName, deductedPoints, remainingPoints) {
+  if (!cardId) return;
+  void (async () => {
+    try {
+      await client.query(
+        `INSERT INTO notifications (qr_code_id, category, ref_id, message, template_name, status)
+         VALUES ($1, 'points', $2, $3, 'sellamo_points', 'pending')
+         ON CONFLICT (qr_code_id, category, ref_id) DO NOTHING`,
+        [
+          cardId,
+          `deduction-${crypto.randomUUID()}`,
+          `Bonjour ${customerName || 'Client'}, ${deductedPoints} points ont été déduits de votre carte fidélité. Il vous reste ${remainingPoints} points.`,
+        ],
+      );
+    } catch (err) {
+      console.error('notifyPointsDeduction failed:', (err && err.message) || err);
+    }
+  })();
+}
+
 // Process card payment — verify card, then atomically insert order + deduct points
 app.post('/process-card-payment', paymentLimiter, async (req, res) => {
   let { qrId, numtable, items, total, rewardId } = req.body;
@@ -757,7 +783,7 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const byToken = await client.query('SELECT token,points,status,name FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
+    const byToken = await client.query('SELECT token,points,status,name,id FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
     if (byToken.rowCount === 0) {
       await client.query('ROLLBACK');
       return res.json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
@@ -870,6 +896,9 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
     `, [discountedTotal, effectiveDiscount > 0 ? effectiveDiscount : null, idrecu]);
 
     await client.query('COMMIT');
+
+    const remainingPoints = Math.round((currentPoints - discountedTotal) * 100) / 100;
+    notifyPointsDeduction(customerRow.id, customerRow.name, discountedTotal, remainingPoints);
 
     res.json({ success: true, idrecu, rewardApplied: rewardApplied || false });
   } catch (err) {
