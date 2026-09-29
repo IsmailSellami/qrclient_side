@@ -98,6 +98,9 @@
     <button id="qrFlashBtn" class="qr-flash-btn" type="button" style="display:none;">💡 Flash</button>
     <div id="qrResult" class="qr-result" aria-hidden="true"></div>
     <div id="loyaltyInfo" class="loyalty-info" style="display:none;"></div>
+<!-- Kept OUTSIDE #loyaltyInfo: renderLoyaltyInfo() replaces that element's
+     innerHTML, which would destroy a counter nested inside it. -->
+<div id="visitCounter" class="visit-counter" style="display:none;">☕ Visites : <span>0</span></div>
     <div id="rewardSelection" class="reward-selection" style="display:none;"></div>
     <button id="confirmPaymentBtn" class="btn btn--primary qr-verify-btn" type="button" style="display:none;">Confirmer le paiement</button>
     <div id="qrCameraError" class="qr-result error" aria-hidden="true" style="display:none;"></div>

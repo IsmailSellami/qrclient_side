@@ -781,6 +781,36 @@ function renderLoyaltyInfo(info) {
     ? `<span class="loyalty-tier-badge" style="background:${tier.color || '#c49b63'}">${tier.icon || '⭐'} ${tier.name}</span>`
     : `<span class="loyalty-tier-badge loyalty-tier-badge--default">⭐ Débutant</span>`;
 
+  // Visit streak: the counter is the durable count of COMPLETED table sessions
+  // this card has had. A scan only opens a visit; the number only moves when the
+  // table is freed, so it never counts a visit the customer did not complete.
+  const visitCount = Number(card.visitCount || 0);
+  const visitRewards = (loyaltyConfig?.rewards || []).filter(r => r.triggerType === 'visits');
+  const nextVisit = visitRewards
+    .filter(r => r.requiredVisits !== null && r.requiredVisits !== undefined && r.requiredVisits > visitCount)
+    .sort((a, b) => a.requiredVisits - b.requiredVisits)[0];
+  let visitHtml = '';
+  if (visitRewards.length > 0) {
+    const pct = nextVisit && nextVisit.requiredVisits > 0
+      ? Math.min(100, Math.round(visitCount / nextVisit.requiredVisits * 100))
+      : 100;
+    visitHtml = `
+      <div class="loyalty-visits">
+        <div class="loyalty-visits__label">
+          <span>☕ Visites</span>
+          <span>${visitCount}${nextVisit ? ` / ${nextVisit.requiredVisits}` : ''}</span>
+        </div>
+        <div class="loyalty-progress__bar">
+          <div class="loyalty-progress__fill" style="width:${pct}%;background:#6b8f71"></div>
+        </div>
+        <div class="loyalty-visits__detail">${
+          nextVisit
+            ? `Encore ${nextVisit.requiredVisits - visitCount} visite${nextVisit.requiredVisits - visitCount > 1 ? 's' : ''} pour : ${nextVisit.name}`
+            : 'Toutes les récompenses de visites sont débloquées !'
+        }</div>
+      </div>`;
+  }
+
   loyaltyInfoEl.innerHTML = `
     <div class="loyalty-info__header">
       ${tierBadgeHtml}
@@ -791,6 +821,7 @@ function renderLoyaltyInfo(info) {
       <span class="loyalty-info__points-label">points disponibles</span>
     </div>
     ${progressHtml}
+    ${visitHtml}
   `;
 }
 
@@ -815,16 +846,25 @@ function renderRewardSelection(configRewards, earnedRewards) {
     let typeLabel = 'Récompense';
     if (r.rewardType === 'discount') typeLabel = `-${r.discountPercent}% de réduction`;
     else if (r.rewardType === 'free_item') typeLabel = r.productId ? `Article gratuit : ${r.productId} (0.00 DT)` : 'Article gratuit';
-    const note = (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0)
-      ? `<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`
-      : '';
+    const notes = [];
+    if (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0) {
+      notes.push(`<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`);
+    }
+    // R5: the catalog's window closed, but this reward was already EARNED, so it
+    // stays fully selectable. The badge is information for the customer, not a
+    // lock — removing the card here would silently confiscate a reward they are
+    // entitled to spend, which is exactly what the lifecycle rule forbids.
+    if (r.isExpired) {
+      notes.push(`<div class="reward-note reward-note--expired">Cette récompense a été gagnée avant la fin de sa période, mais reste valable et utilisable.</div>`);
+    }
     return `
-      <div class="reward-card" data-reward-id="${r.id}">
+      <div class="reward-card${r.isExpired ? ' reward-card--expired' : ''}" data-reward-id="${r.id}">
         <div class="reward-card__name">${r.rewardName || r.name || 'Récompense'}</div>
         <div class="reward-card__type">${typeLabel}</div>
         ${r.mysteryResult ? `<div class="reward-card__mystery">${r.mysteryResult}</div>` : ''}
+        ${r.isExpired ? '<span class="reward-card__badge">Gagnée · hors période</span>' : ''}
       </div>
-      ${note}`;
+      ${notes.join('')}`;
   }).join('');
 
   rewardSelectionEl.innerHTML = `
@@ -895,6 +935,7 @@ function refreshConfirmButton() {
 function resetLoyaltyUI() {
   if (loyaltyInfoEl) { loyaltyInfoEl.style.display = 'none'; loyaltyInfoEl.innerHTML = ''; }
   if (rewardSelectionEl) { rewardSelectionEl.style.display = 'none'; rewardSelectionEl.innerHTML = ''; }
+  if (visitCounterEl) { visitCounterEl.style.display = 'none'; }
   if (confirmPaymentBtn) confirmPaymentBtn.style.display = 'none';
   selectedRewardId = null;
   selectedRewardDiscount = 0;
@@ -1368,6 +1409,12 @@ async function verifyQrCode(qrId) {
       renderRewardSelection(loyaltyConfig?.rewards || [], loyaltyCustomerInfo?.rewards || []);
     }
 
+    // Start the visit. This is the PRIMARY way a visit begins (recomponce.md §4):
+    // the customer scans, the card is bound to this table's session, and the
+    // visit is counted when the waiter frees the table. Fire-and-forget on
+    // purpose — a visit-tracking hiccup must never block a valid payment.
+    startVisit(qrId);
+
     if (confirmPaymentBtn) {
       confirmPaymentBtn.textContent = `Confirmer le paiement — ${getEffectivePaymentTotal().toFixed(3)} DT`;
       confirmPaymentBtn.style.display = "block";
@@ -1379,6 +1426,45 @@ async function verifyQrCode(qrId) {
     qrResult.textContent = "Erreur de connexion. Veuillez réessayer.";
     qrResult.style.display = "block";
   }
+}
+
+/**
+ * Open (or re-confirm) this card's visit for the current table.
+ *
+ * Idempotent by design: scanning the same card again at the same table returns
+ * the same visit with created:false and does NOT increment anything, so one
+ * sitting counts once no matter how many times the customer re-scans. A failed
+ * visit call is logged, never surfaced — losing a visit must not cost the
+ * customer their payment.
+ */
+async function startVisit(token) {
+  try {
+    const res = await fetch("/api/loyalty/visit/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, numtable })
+    });
+    if (!res.ok) {
+      console.warn("Visit not started:", (await res.json().catch(() => ({}))).error);
+      return;
+    }
+    const data = await res.json();
+    if (data.visitCount !== undefined) renderVisitCounter(data.visitCount);
+  } catch (e) {
+    console.warn("Could not start visit:", e);
+  }
+}
+
+let visitCounterEl = null;
+
+function renderVisitCounter(visitCount) {
+  if (!visitCounterEl) visitCounterEl = document.getElementById("visitCounter");
+  if (!visitCounterEl) return;
+  // The element wraps the number in a <span>; only that node is replaced so the
+  // "☕ Visites :" label is not clobbered.
+  const numEl = visitCounterEl.querySelector("span") || visitCounterEl;
+  numEl.textContent = visitCount;
+  visitCounterEl.style.display = "inline-block";
 }
 
 async function processCardPaymentWithReward() {

@@ -155,7 +155,7 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
     }
 
     const cardResult = await pool.query(
-      'SELECT id, name, phone, points, status, lifetime_points, assigned_at FROM qr_code WHERE token = $1',
+      'SELECT id, name, phone, points, status, lifetime_points, visit_count, assigned_at FROM qr_code WHERE token = $1',
       [token]
     );
     if (cardResult.rowCount === 0) {
@@ -174,16 +174,19 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
     const nextTier = null;
     const lifetime = Number(card.lifetime_points || 0);
 
-    // Rewards
+    // Rewards — R5: an earned reward is the customer's permanently. The catalog
+    // row's is_active / starts_at / ends_at gate UNLOCK, never visibility, so
+    // they are deliberately NOT in this WHERE clause. isExpired is a label the
+    // UI uses to grey the chip out; the claim stays selectable and redeemable.
     const rewardsResult = await pool.query(
       `SELECT cr.id, cr.mystery_result AS "mysteryResult", cr.is_redeemed AS "isRedeemed", cr.earned_at AS "earnedAt", cr.redeemed_at AS "redeemedAt",
-              lr.name AS "rewardName", lr.reward_type AS "rewardType", lr.required_points AS "requiredPoints", lr.discount_percent AS "discountPercent", lr.product_id AS "productId"
+              lr.name AS "rewardName", lr.reward_type AS "rewardType", lr.trigger_type AS "triggerType",
+              lr.required_points AS "requiredPoints", lr.required_visits AS "requiredVisits",
+              lr.discount_percent AS "discountPercent", lr.product_id AS "productId", lr.ends_at AS "endsAt",
+              (lr.ends_at IS NOT NULL AND lr.ends_at < NOW()) AS "isExpired"
        FROM customer_rewards cr
        JOIN loyalty_rewards lr ON lr.id = cr.reward_id
        WHERE cr.qr_code_id = $1
-         AND lr.is_active = true
-         AND (lr.starts_at IS NULL OR lr.starts_at <= NOW())
-         AND (lr.ends_at IS NULL OR lr.ends_at >= NOW())
        ORDER BY cr.earned_at DESC`,
       [cardId]
     );
@@ -219,6 +222,7 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
         phone: card.phone,
         points: Number(card.points || 0),
         lifetimePoints: lifetime,
+        visitCount: Number(card.visit_count || 0),
         assignedAt: card.assigned_at,
       },
       tier,
@@ -232,6 +236,113 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
   } catch (err) {
     console.error('GET /api/loyalty/public/customer/:token error:', err);
     res.status(500).json({ success: false, error: 'Erreur serveur' });
+  }
+});
+
+/* ───── Customer visits (recomponce.md §4, §5) ───── */
+
+// Same accounting as the Express implementation in serveur/src/services/
+// loyalty.service.ts, expressed in raw SQL. Kept in sync on purpose: the public
+// client and the manager back office must agree on when a visit starts, or the
+// counter drifts between the two.
+async function openVisitForToken(token, numtable) {
+  const cardResult = await pool.query(
+    'SELECT id, status, visit_count FROM qr_code WHERE token = $1',
+    [token]
+  );
+  if (cardResult.rowCount === 0) return { error: 'NOT_FOUND' };
+  if (cardResult.rows[0].status !== 'active') return { error: 'INACTIVE_CARD' };
+  const cardId = cardResult.rows[0].id;
+
+  const recuResult = await pool.query(
+    'SELECT idrecu FROM recu WHERE id = $1 AND heurf IS NULL ORDER BY idrecu DESC LIMIT 1',
+    [numtable]
+  );
+  if (recuResult.rowCount === 0) return { error: 'TABLE_NOT_OPEN' };
+  const recuId = recuResult.rows[0].idrecu;
+
+  // A forgotten "Sortire" must never freeze the customer forever: close visits
+  // older than the stale window before deciding if this is a new visit.
+  const staleCutoff = new Date(Date.now() - 12 * 60 * 60 * 1000);
+  const stale = await pool.query(
+    `SELECT DISTINCT recu_id FROM customer_visits
+     WHERE qr_code_id = $1 AND status = 'open' AND started_at < $2 AND recu_id IS NOT NULL`,
+    [cardId, staleCutoff]
+  );
+  for (const row of stale.rows) {
+    const claimed = await pool.query(
+      `UPDATE customer_visits SET status = 'completed', counted = true, ended_at = NOW()
+       WHERE qr_code_id = $1 AND recu_id = $2 AND status = 'open'
+       RETURNING id`,
+      [cardId, row.recu_id]
+    );
+    if (claimed.rowCount > 0) {
+      await pool.query('UPDATE qr_code SET visit_count = visit_count + 1 WHERE id = $1', [cardId]);
+    }
+  }
+
+  // Get-or-create for THIS receipt. Re-scanning the same card at the same table
+  // returns the same row (created:false) so one sitting counts once; a different
+  // receipt is a new visit.
+  const existing = await pool.query(
+    `SELECT id, numtable FROM customer_visits
+     WHERE qr_code_id = $1 AND recu_id = $2 AND status = 'open'`,
+    [cardId, recuId]
+  );
+  let visit;
+  if (existing.rowCount > 0) {
+    visit = { id: Number(existing.rows[0].id), numtable: existing.rows[0].numtable, created: false };
+  } else {
+    const created = await pool.query(
+      `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, started_at, created_at, updated_at)
+       VALUES ($1, $2, $3, 'open', false, NOW(), NOW(), NOW())
+       ON CONFLICT DO NOTHING
+       RETURNING id, numtable`,
+      [cardId, recuId, numtable]
+    );
+    if (created.rowCount > 0) {
+      visit = { id: Number(created.rows[0].id), numtable: created.rows[0].numtable, created: true };
+    } else {
+      // Lost a race with a concurrent scan — reuse the winner's row.
+      const again = await pool.query(
+        `SELECT id, numtable FROM customer_visits
+         WHERE qr_code_id = $1 AND recu_id = $2 AND status = 'open'`,
+        [cardId, recuId]
+      );
+      visit = { id: Number(again.rows[0].id), numtable: again.rows[0].numtable, created: false };
+    }
+  }
+
+  const after = await pool.query('SELECT visit_count FROM qr_code WHERE id = $1', [cardId]);
+  return { cardId, visitCount: Number(after.rows[0]?.visit_count || 0), visit };
+}
+
+/**
+ * Public: the customer scans their card at a table. This is the primary way a
+ * visit begins. The visit is COUNTED when the table is freed with "Sortire"
+ * (or swept as stale after 12h), not here — a scan alone must never award.
+ */
+app.post('/api/loyalty/visit/start', async (req, res) => {
+  const { token, numtable } = req.body || {};
+  if (!token || typeof token !== 'string' || token.length < 24) {
+    return res.status(400).json({ success: false, error: 'TOKEN_REQUIRED' });
+  }
+  const table = Number(numtable);
+  if (!Number.isInteger(table) || table < 1) {
+    return res.status(400).json({ success: false, error: 'TABLE_REQUIRED' });
+  }
+  try {
+    const result = await openVisitForToken(token, table);
+    if (result.error === 'NOT_FOUND') {
+      return res.status(404).json({ success: false, error: 'NOT_FOUND' });
+    }
+    if (result.error) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('POST /api/loyalty/visit/start error:', err);
+    res.status(500).json({ success: false, error: 'DB_ERROR' });
   }
 });
 
@@ -288,13 +399,17 @@ app.post('/api/loyalty/public/redeem-reward', paymentLimiter, async (req, res) =
       return res.status(400).json({ success: false, error: 'INACTIVE_CARD' });
     }
 
+    // R5 / R7: entitlement is proven by the CLAIM, not by the catalog row.
+    // `customer_rewards.id + qr_code_id + is_redeemed = false` is the whole
+    // authorization. The two window predicates that used to sit here meant a
+    // customer who earned a reward at 17:50 lost it at 18:01 and could never
+    // spend it — the exact theft the binding lifecycle rule forbids. They are
+    // removed: ends_at is an unlock condition, never an expiry of ownership.
     const customerReward = await client.query(
       `SELECT cr.id
        FROM customer_rewards cr
-       JOIN loyalty_rewards lr ON lr.id = cr.reward_id
        WHERE cr.id = $1 AND cr.qr_code_id = $2 AND cr.is_redeemed = false
-         AND (lr.starts_at IS NULL OR lr.starts_at <= NOW())
-         AND (lr.ends_at IS NULL OR lr.ends_at >= NOW())`,
+       FOR UPDATE`,
       [rewardIdNum, card.id]
     );
     if (customerReward.rowCount === 0) {
@@ -734,9 +849,7 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
             `SELECT cr.id, cr.reward_id, cr.is_redeemed, lr.reward_type, lr.discount_percent, lr.product_id
              FROM customer_rewards cr
              JOIN loyalty_rewards lr ON lr.id = cr.reward_id
-             WHERE cr.id = $1 AND cr.qr_code_id = $2 AND cr.is_redeemed = false
-               AND (lr.starts_at IS NULL OR lr.starts_at <= NOW())
-               AND (lr.ends_at IS NULL OR lr.ends_at >= NOW())`,
+             WHERE cr.id = $1 AND cr.qr_code_id = $2 AND cr.is_redeemed = false`,
             [rewardId, cardId]
           );
           if (rewardResult.rowCount > 0) {
