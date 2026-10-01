@@ -294,8 +294,8 @@ async function openVisitForToken(token, numtable) {
     visit = { id: Number(existing.rows[0].id), numtable: existing.rows[0].numtable, created: false };
   } else {
     const created = await pool.query(
-      `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, started_at, created_at, updated_at)
-       VALUES ($1, $2, $3, 'open', false, NOW(), NOW(), NOW())
+      `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, started_at)
+       VALUES ($1, $2, $3, 'open', false, NOW())
        ON CONFLICT DO NOTHING
        RETURNING id, numtable`,
       [cardId, recuId, numtable]
@@ -931,10 +931,25 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
+    // recomponce.md §4 + §12: the payment is the moment the card is definitively
+    // bound to this table, so the visit is opened here — the customer never has to
+    // ask the waiter to associate their card. Must run AFTER COMMIT: openVisitForToken
+    // reads the receipt through its own pool connection and cannot see the row
+    // inserted above until this transaction commits. Idempotent (uq_customer_visit_open),
+    // and deliberately non-fatal — a visit hiccup must never void a valid payment.
+    let visitCount;
+    try {
+      const visitResult = await openVisitForToken(qrId, numtable);
+      if (visitResult.error) console.warn('Visit not opened:', visitResult.error);
+      else visitCount = visitResult.visitCount;
+    } catch (visitErr) {
+      console.warn('Visit not opened (non-fatal):', visitErr.message);
+    }
+
     const remainingPoints = Math.round((currentPoints - discountedTotal) * 100) / 100;
     notifyPointsDeduction(customerRow.id, customerRow.name, discountedTotal, remainingPoints);
 
-    res.json({ success: true, idrecu, rewardApplied: rewardApplied || false });
+    res.json({ success: true, idrecu, rewardApplied: rewardApplied || false, visitCount });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);

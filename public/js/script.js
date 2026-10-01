@@ -1515,6 +1515,13 @@ async function processCardPaymentWithReward() {
       earnedPoints = displayTotal;
     }
 
+    // The visit itself is opened server-side by this payment (recomponce.md §4/§12).
+    // The scan-time startVisit() call can legitimately fail when the table has no
+    // open receipt yet, so trust the authoritative count the payment returns.
+    if (payData.visitCount !== undefined) {
+      renderVisitCounter(payData.visitCount);
+    }
+
     qrResult.className = "qr-result success";
     qrResult.innerHTML = `Paiement réussi ! Merci de votre visite.`;
     qrResult.style.display = "block";
