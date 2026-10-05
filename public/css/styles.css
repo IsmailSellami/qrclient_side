@@ -435,6 +435,13 @@ textarea{
   transition: opacity 0.2s ease, transform 0.2s ease;
   z-index: 110;
   overflow: hidden;
+  /* Bounded to the screen: the QR modal grows with the camera + loyalty info +
+     reward list, and a fixed, vertically centred box taller than the viewport
+     puts its top and bottom (close button, confirm button) off-screen. */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
 }
 
 .modal.open {
@@ -449,6 +456,7 @@ textarea{
   justify-content: space-between;
   padding: 16px 20px;
   border-bottom: 1px solid #e5e7eb;
+  flex: 0 0 auto;
 }
 
 .modal__title {
@@ -466,8 +474,16 @@ textarea{
   padding: 0 4px;
 }
 
+/* Single scroll container for the modal content: the header stays pinned, and
+   everything below it (loyalty info, every reward, the confirm button) stays
+   reachable by scrolling instead of overflowing off-screen. */
 .modal__body {
   padding: 24px 20px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .discount-banner {
@@ -553,6 +569,13 @@ textarea{
   padding: 14px;
   font-size: 16px;
   font-weight: 600;
+  /* Pinned to the bottom of the scrolling body: with many rewards the order
+     confirmation button would otherwise sit below the fold, out of reach.
+     .modal clips it to its own rounded corners. */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  box-shadow: 0 -6px 8px -4px rgba(15, 23, 42, 0.18);
 }
 
 .qr-result {
@@ -809,8 +832,10 @@ textarea{
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 220px;
-  overflow-y: auto;
+  /* No fixed max-height / nested scroll: that clipped rewards into a ~2-card
+     window that scrolls on its own (on touch, competing with the modal body) and
+     hid rewards 3, 4, 5... behind the confirm button. The whole modal body is
+     the single scroll area, so any number of rewards stays reachable. */
   padding-right: 4px;
 }
 

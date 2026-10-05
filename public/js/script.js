@@ -1023,6 +1023,10 @@ function startQrScanner() {
   if (qrScannerRunning || qrStartPromise) return;
 
   qrStartPromise = (async () => {
+    // The preview is only shown while the camera actually runs (see
+    // stopQrScanner). html5-qrcode needs a visible container to size itself.
+    const readerEl = document.getElementById("qr-reader");
+    if (readerEl) readerEl.style.display = "block";
     try {
       if (await isNativeQrSupported()) {
         try {
@@ -1228,6 +1232,10 @@ function stopQrScanner() {
   qrNativeInFlight = false;
   setTorchOff();
   if (qrFlashBtn) qrFlashBtn.style.display = "none";
+  // The camera is off: drop the frozen preview so it cannot push the loyalty
+  // info, the rewards and the confirm button off a small screen.
+  const readerEl = document.getElementById("qr-reader");
+  if (readerEl) readerEl.style.display = "none";
   qrScannerRunning = false;
 }
 
