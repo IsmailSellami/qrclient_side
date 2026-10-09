@@ -376,9 +376,36 @@ async function queueVisitNotification(cardId, category, refId, message, template
  * card that opened a visit on this receipt (by scanning at this table) is
  * considered. The visit row itself still carries the card.
  *
+ * When the card is known and no row exists yet for this (card, receipt), the
+ * first order creates the row (Case A), so a session ordered before any scan
+ * is still order-backed. A row that already exists in ANY status means the
+ * sitting is over — never a second row for one visit (one sitting, one row).
+ *
  * Never throws: a progress hiccup must never void a valid order.
  */
-async function recordVisitOrderForRecu(recuId, cardId) {
+async function recordVisitOrderForRecu(recuId, cardId, numtable) {
+  if (cardId && recuId) {
+    const existing = await pool.query(
+      `SELECT id FROM customer_visits
+        WHERE qr_code_id = $1 AND recu_id = $2
+        LIMIT 1`,
+      [cardId, recuId]);
+    if (existing.rowCount === 0) {
+      let tableNo = Number(numtable);
+      if (!Number.isFinite(tableNo)) {
+        const tbl = await pool.query('SELECT id FROM recu WHERE idrecu = $1', [recuId]);
+        if (tbl.rowCount > 0) tableNo = Number(tbl.rows[0].id);
+      }
+      if (Number.isFinite(tableNo)) {
+        await pool.query(
+          `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, order_count, started_at)
+           VALUES ($1, $2, $3, 'open', false, 0, NOW())
+           ON CONFLICT DO NOTHING`,
+          [cardId, recuId, tableNo]);
+      }
+    }
+  }
+
   const openVisits = cardId
     ? await pool.query(
         `SELECT id, qr_code_id FROM customer_visits
@@ -755,7 +782,7 @@ app.post('/demander', async (req, res) => {
     // cardId is null so every open visit on this receipt is considered.
     // Non-fatal: never void a valid order.
     try {
-      await recordVisitOrderForRecu(idrecu, null);
+      await recordVisitOrderForRecu(idrecu, null, numtable);
     } catch (visitOrderErr) {
       console.warn('Visit order not recorded (non-fatal):', visitOrderErr.message);
     }
@@ -1126,7 +1153,7 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
     // visit — and if this order is the one that completes a `required_visits`
     // threshold, count it here instead of waiting for "Sortire" (recomponce.md §6).
     try {
-      const counted = await recordVisitOrderForRecu(idrecu, customerRow.id);
+      const counted = await recordVisitOrderForRecu(idrecu, customerRow.id, numtable);
       if (counted !== undefined) visitCount = counted;
     } catch (visitOrderErr) {
       console.warn('Visit order not recorded (non-fatal):', visitOrderErr.message);
