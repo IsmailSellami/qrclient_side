@@ -245,6 +245,68 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
 // loyalty.service.ts, expressed in raw SQL. Kept in sync on purpose: the public
 // client and the manager back office must agree on when a visit starts, or the
 // counter drifts between the two.
+/**
+ * The single active visit reward, if any. recomponce01.md §3.1: the source of
+ * truth is `trigger_type='visits'` + active + NOW() inside the window. Overlap
+ * prevention (loyalty routes) guarantees at most one; if more ever slip in,
+ * the lowest threshold wins deterministically.
+ */
+async function getActiveVisitReward() {
+  const result = await pool.query(
+    `SELECT id, name, required_visits, ends_at FROM loyalty_rewards
+      WHERE is_active = true AND trigger_type = 'visits'
+        AND (starts_at IS NULL OR starts_at <= NOW())
+        AND (ends_at IS NULL OR ends_at >= NOW())
+      ORDER BY required_visits ASC NULLS LAST, id ASC
+      LIMIT 1`
+  );
+  return result.rowCount > 0 ? result.rows[0] : null;
+}
+
+/**
+ * recomponce01.md §3.2: detect a brand-new visit-reward cycle and clear
+ * customer_visits exactly ONCE. The transition is keyed on the active reward
+ * id stored in `system_state`; the conditional upsert returns a row only for the
+ * caller that actually changes the id, so concurrent orders cannot double-clear.
+ * Earned `customer_rewards` are never touched. Returns the active reward (or
+ * null). Degrades gracefully when `system_state` is absent (migration not yet
+ * applied): gating still works, only the one-time reset is skipped.
+ */
+async function syncVisitRewardCycle() {
+  const active = await getActiveVisitReward();
+  if (!active) return null;
+  const conn = await pool.connect();
+  try {
+    await conn.query('BEGIN');
+    const transitioned = await conn.query(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('current_visit_reward_id', $1, NOW())
+       ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value, updated_at = NOW()
+         WHERE system_state.value IS DISTINCT FROM EXCLUDED.value
+       RETURNING key`,
+      [String(active.id)]
+    );
+    await conn.query(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('current_visit_reward_ends_at', $1, NOW())
+       ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value, updated_at = NOW()`,
+      [active.ends_at ? new Date(active.ends_at).toISOString() : '']
+    );
+    if (transitioned.rowCount > 0) {
+      await conn.query('DELETE FROM customer_visits');
+    }
+    await conn.query('COMMIT');
+  } catch (err) {
+    try { await conn.query('ROLLBACK'); } catch (_) {}
+    if (!/system_state/i.test(String(err && err.message))) throw err;
+  } finally {
+    conn.release();
+  }
+  return active;
+}
+
 async function openVisitForToken(token, numtable) {
   const cardResult = await pool.query(
     'SELECT id, status, visit_count FROM qr_code WHERE token = $1',
@@ -260,6 +322,15 @@ async function openVisitForToken(token, numtable) {
   );
   if (recuResult.rowCount === 0) return { error: 'TABLE_NOT_OPEN' };
   const recuId = recuResult.rows[0].idrecu;
+
+  // recomponce01.md §3.3: visits only exist while a valid visit reward is in
+  // window. Detect a cycle transition first (one-time reset), then stop here if
+  // no reward is active — no insert/update of visit-counting rows.
+  const activeReward = await syncVisitRewardCycle();
+  if (!activeReward) {
+    const after = await pool.query('SELECT visit_count FROM qr_code WHERE id = $1', [cardId]);
+    return { cardId, visitCount: Number(after.rows[0]?.visit_count || 0), visit: null, rewardActive: false };
+  }
 
   // A forgotten "Sortire" must never freeze the customer forever: close visits
   // older than the stale window before deciding if this is a new visit.
@@ -384,6 +455,11 @@ async function queueVisitNotification(cardId, category, refId, message, template
  * Never throws: a progress hiccup must never void a valid order.
  */
 async function recordVisitOrderForRecu(recuId, cardId, numtable) {
+  // recomponce01.md §3.3: only count/record visits while a valid visit reward is
+  // in window. This also runs the once-only cycle reset when a new reward starts.
+  const activeReward = await syncVisitRewardCycle();
+  if (!activeReward) return undefined;
+
   if (cardId && recuId) {
     const existing = await pool.query(
       `SELECT id FROM customer_visits
