@@ -239,12 +239,13 @@ app.get('/api/loyalty/public/customer/:token', async (req, res) => {
   }
 });
 
-/* ───── Customer visits (recomponce.md §4, §5) ───── */
+/* ───── Customer visits (per-card counter) ───── */
 
-// Same accounting as the Express implementation in serveur/src/services/
-// loyalty.service.ts, expressed in raw SQL. Kept in sync on purpose: the public
-// client and the manager back office must agree on when a visit starts, or the
-// counter drifts between the two.
+// Visits are a per-customer counter kept in `customer_visits`, keyed by
+// qr_code_id. A visit is counted the moment the customer pays with their
+// loyalty card, and a reward is granted when the counter reaches the active
+// visit reward's `required_visits`. Kept byte-for-byte in sync with
+// client-side/serveur.js.
 /**
  * The single active visit reward, if any. recomponce01.md §3.1: the source of
  * truth is `trigger_type='visits'` + active + NOW() inside the window. Overlap
@@ -307,103 +308,6 @@ async function syncVisitRewardCycle() {
   return active;
 }
 
-async function openVisitForToken(token, numtable) {
-  const cardResult = await pool.query(
-    'SELECT id, status, visit_count FROM qr_code WHERE token = $1',
-    [token]
-  );
-  if (cardResult.rowCount === 0) return { error: 'NOT_FOUND' };
-  if (cardResult.rows[0].status !== 'active') return { error: 'INACTIVE_CARD' };
-  const cardId = cardResult.rows[0].id;
-
-  const recuResult = await pool.query(
-    'SELECT idrecu FROM recu WHERE id = $1 AND heurf IS NULL ORDER BY idrecu DESC LIMIT 1',
-    [numtable]
-  );
-  if (recuResult.rowCount === 0) return { error: 'TABLE_NOT_OPEN' };
-  const recuId = recuResult.rows[0].idrecu;
-
-  // recomponce01.md §3.3: visits only exist while a valid visit reward is in
-  // window. Detect a cycle transition first (one-time reset), then stop here if
-  // no reward is active — no insert/update of visit-counting rows.
-  const activeReward = await syncVisitRewardCycle();
-  if (!activeReward) {
-    const after = await pool.query('SELECT visit_count FROM qr_code WHERE id = $1', [cardId]);
-    return { cardId, visitCount: Number(after.rows[0]?.visit_count || 0), visit: null, rewardActive: false };
-  }
-
-  // A forgotten "Sortire" must never freeze the customer forever: close visits
-  // older than the stale window before deciding if this is a new visit.
-  // The same two gates as "Sortire" apply here: without an active `visite`
-  // reward the visit count must not move, and a session where the customer
-  // never ordered is not a visit.
-  const staleCutoff = new Date(Date.now() - 12 * 60 * 60 * 1000);
-  const stale = await pool.query(
-    `SELECT id, order_count FROM customer_visits
-     WHERE qr_code_id = $1 AND status = 'open' AND started_at < $2 AND recu_id IS NOT NULL`,
-    [cardId, staleCutoff]
-  );
-  if (stale.rowCount > 0) {
-    const activeVisiteReward = await pool.query(
-      `SELECT 1 FROM loyalty_rewards
-        WHERE is_active = true AND trigger_type = 'visits'
-          AND (starts_at IS NULL OR starts_at <= NOW())
-          AND (ends_at IS NULL OR ends_at >= NOW())
-        LIMIT 1`
-    );
-    const mayCount = activeVisiteReward.rowCount > 0;
-    for (const row of stale.rows) {
-      const counts = mayCount && Number(row.order_count || 0) > 0;
-      const claimed = await pool.query(
-        `UPDATE customer_visits SET status = 'completed', counted = $2, ended_at = NOW()
-         WHERE id = $1 AND status = 'open'
-         RETURNING id`,
-        [row.id, counts]
-      );
-      if (counts && claimed.rowCount > 0) {
-        await pool.query('UPDATE qr_code SET visit_count = visit_count + 1 WHERE id = $1', [cardId]);
-      }
-    }
-  }
-
-  // Get-or-create for THIS receipt. Re-scanning the same card at the same table
-  // returns the same row (created:false) so one sitting counts once; a different
-  // receipt is a new visit. The lookup matches ANY status on purpose: a session
-  // already claimed by a threshold order is finished, and reusing it (instead of
-  // inserting a second row) is what keeps one sitting at exactly one visit.
-  const existing = await pool.query(
-    `SELECT id, numtable FROM customer_visits
-     WHERE qr_code_id = $1 AND recu_id = $2`,
-    [cardId, recuId]
-  );
-  let visit;
-  if (existing.rowCount > 0) {
-    visit = { id: Number(existing.rows[0].id), numtable: existing.rows[0].numtable, created: false };
-  } else {
-    const created = await pool.query(
-      `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, started_at)
-       VALUES ($1, $2, $3, 'open', false, NOW())
-       ON CONFLICT DO NOTHING
-       RETURNING id, numtable`,
-      [cardId, recuId, numtable]
-    );
-    if (created.rowCount > 0) {
-      visit = { id: Number(created.rows[0].id), numtable: created.rows[0].numtable, created: true };
-    } else {
-      // Lost a race with a concurrent scan — reuse the winner's row.
-      const again = await pool.query(
-        `SELECT id, numtable FROM customer_visits
-         WHERE qr_code_id = $1 AND recu_id = $2`,
-        [cardId, recuId]
-      );
-      visit = { id: Number(again.rows[0].id), numtable: again.rows[0].numtable, created: false };
-    }
-  }
-
-  const after = await pool.query('SELECT visit_count FROM qr_code WHERE id = $1', [cardId]);
-  return { cardId, visitCount: Number(after.rows[0]?.visit_count || 0), visit };
-}
-
 /** Same rule as the POS server's notifyClient(): a Tunisian mobile number only. */
 function visitPhoneEligible(phone) {
   let cleaned = String(phone || '').replace(/[\s\-().]/g, '');
@@ -426,190 +330,141 @@ async function queueVisitNotification(cardId, category, refId, message, template
 }
 
 /**
- * Record that an order happened during a visit and, when this order is the one
- * that completes a `required_visits` threshold, count the visit straight away.
+ * Count a visit for the customer on a loyalty-card payment (Task 2).
  *
- * recomponce.md §6: an order is what makes a visit valid, so the order is also the
- * earliest moment the customer is certainly there. Ordinary visits stay `open` and
- * are still counted when the waiter frees the table with "Sortire"; only the visit
- * that reaches a threshold is claimed here, so the reward is unlocked and notified
- * without waiting for the customer to leave.
+ * Rules, in order:
+ *  1. A visit is only counted while a valid, non-expired visit reward exists.
+ *     With no active reward (or an expired one) the whole reward loop stops.
+ *  2. If the customer has no row in `customer_visits` yet, create it with
+ *     `order_count = 1` (this first loyalty payment is their first visit) and stop.
+ *     If they already own the reward for this cycle (`reward = TRUE`), stop.
+ *  3. If the customer still has an open receipt with one of their orders, they
+ *     have not left the cafe yet: do nothing.
+ *  4. Otherwise the customer has left and come back: bump `order_count` by 1.
+ *  5. When `order_count` reaches the manager's `required_visits`, grant the
+ *     reward: insert into `customer_rewards` once and set `reward = TRUE`.
  *
- * Idempotent and race-safe, mirroring closeVisitsForRecu()/notifyVisitUnlocks():
- *  - `order_count` is a plain increment on the still-open row;
- *  - the claim is one conditional `UPDATE ... WHERE status = 'open'`, so only the
- *    caller that flips the row performs the `visit_count` increment — a later
- *    "Sortire" (or a duplicate payment) matches nothing and cannot double count;
- *  - reward claims go through uq_customer_reward_unredeemed, so a reward is
- *    granted once and stays the customer's permanently (R1/R2).
- *
- * `cardId` is null on the cash route (/demander), which carries no token: every
- * card that opened a visit on this receipt (by scanning at this table) is
- * considered. The visit row itself still carries the card.
- *
- * When the card is known and no row exists yet for this (card, receipt), the
- * first order creates the row (Case A), so a session ordered before any scan
- * is still order-backed. A row that already exists in ANY status means the
- * sitting is over — never a second row for one visit (one sitting, one row).
- *
- * Never throws: a progress hiccup must never void a valid order.
+ * Called BEFORE this payment writes its own receipt/order (see
+ * /process-card-payment), so the "still at the cafe" lookup sees the customer's
+ * previous open receipts, never the order being placed right now.
+ * Non-fatal: a visit hiccup must never void a valid payment.
  */
-async function recordVisitOrderForRecu(recuId, cardId, numtable) {
-  // recomponce01.md §3.3: only count/record visits while a valid visit reward is
-  // in window. This also runs the once-only cycle reset when a new reward starts.
+async function processVisitForCardPayment(cardId, clientName) {
+  // 1. Is a visit reward available right now? No active (or an expired) reward
+  //    means the whole reward loop stops without touching customer_visits.
   const activeReward = await syncVisitRewardCycle();
-  if (!activeReward) return undefined;
+  if (!activeReward) return null;
 
-  if (cardId && recuId) {
-    const existing = await pool.query(
-      `SELECT id FROM customer_visits
-        WHERE qr_code_id = $1 AND recu_id = $2
-        LIMIT 1`,
-      [cardId, recuId]);
-    if (existing.rowCount === 0) {
-      let tableNo = Number(numtable);
-      if (!Number.isFinite(tableNo)) {
-        const tbl = await pool.query('SELECT id FROM recu WHERE idrecu = $1', [recuId]);
-        if (tbl.rowCount > 0) tableNo = Number(tbl.rows[0].id);
-      }
-      if (Number.isFinite(tableNo)) {
-        await pool.query(
-          `INSERT INTO customer_visits (qr_code_id, recu_id, numtable, status, counted, order_count, started_at)
-           VALUES ($1, $2, $3, 'open', false, 0, NOW())
-           ON CONFLICT DO NOTHING`,
-          [cardId, recuId, tableNo]);
-      }
-    }
+  // 2. Does the customer already have a counter row?
+  const existing = await pool.query(
+    `SELECT id, reward FROM customer_visits
+      WHERE qr_code_id = $1
+      ORDER BY id DESC
+      LIMIT 1`,
+    [cardId]
+  );
+
+  if (existing.rowCount === 0) {
+    // First loyalty payment: create the counter with this visit already counted,
+    // then exit immediately.
+    await pool.query(
+      `INSERT INTO customer_visits (qr_code_id, status, order_count, reward, started_at)
+       VALUES ($1, 'open', 1, false, NOW())
+       ON CONFLICT DO NOTHING`,
+      [cardId]
+    );
+    return 1;
   }
 
-  const openVisits = cardId
-    ? await pool.query(
-        `SELECT id, qr_code_id FROM customer_visits
-          WHERE qr_code_id = $1 AND recu_id = $2 AND status = 'open'`,
-        [cardId, recuId])
-    : await pool.query(
-        `SELECT id, qr_code_id FROM customer_visits
-          WHERE recu_id = $1 AND status = 'open'`,
-        [recuId]);
+  const visit = existing.rows[0];
 
-  let visitCount;
-  for (const visit of openVisits.rows) {
-    const targetCard = Number(visit.qr_code_id);
+  // The customer already earned this cycle's reward: stop, never grant again.
+  if (visit.reward === true) return null;
 
-    // An order happened, so the visit is now order-backed.
-    const ordered = await pool.query(
-      `UPDATE customer_visits SET order_count = order_count + 1
-        WHERE id = $1 AND status = 'open' RETURNING id`,
-      [visit.id]);
-    if (ordered.rowCount === 0) continue; // closed in the meantime
+  // 3. Is the customer still at the cafe? An open receipt that already carries
+  //    one of their orders means they have not left yet, so this is not a new visit.
+  const atCafe = await pool.query(
+    `SELECT idrecu FROM recu
+      WHERE heurf IS NULL
+        AND idrecu IN (SELECT idrecu FROM orderr WHERE nom_ut = $1)
+      LIMIT 1`,
+    [clientName]
+  );
+  if (atCafe.rowCount > 0) return null;
 
-    const card = await pool.query(
-      'SELECT id, name, phone, visit_count FROM qr_code WHERE id = $1',
-      [targetCard]);
-    if (card.rowCount === 0) continue;
-    visitCount = Number(card.rows[0].visit_count || 0);
+  // 4. They left and came back: count exactly one new visit.
+  const bumped = await pool.query(
+    `UPDATE customer_visits SET order_count = order_count + 1
+      WHERE id = $1
+      RETURNING order_count`,
+    [visit.id]
+  );
+  const orderCount = Number(bumped.rows[0].order_count);
 
-    // Would counting this visit right now unlock a visit reward? The window
-    // filter mirrors unlockRewardsForVisit(): ends_at gates UNLOCK, and a reward
-    // earned inside the window is never invalidated later (R1). A reward the
-    // customer already owns (unredeemed) never triggers an early claim — only
-    // the visit that reaches a not-yet-earned threshold completes the reward.
-    const reaching = await pool.query(
-      `SELECT id, name FROM loyalty_rewards
-        WHERE is_active = true AND trigger_type = 'visits' AND required_visits <= $1
-          AND (starts_at IS NULL OR starts_at <= NOW())
-          AND (ends_at IS NULL OR ends_at >= NOW())
-          AND NOT EXISTS (
-            SELECT 1 FROM customer_rewards owned
-             WHERE owned.qr_code_id = $2
-               AND owned.reward_id = loyalty_rewards.id
-               AND owned.is_redeemed = false
-          )
-        ORDER BY required_visits ASC`,
-      [visitCount + 1, targetCard]);
-    if (reaching.rowCount === 0) continue; // not the completing visit → "Sortire" counts it
-
-    // The atomic claim: only the caller that flips exactly one open row counts.
+  // 5. Threshold reached? Grant the reward once and mark the cycle as rewarded.
+  const threshold = Number(activeReward.required_visits);
+  if (Number.isFinite(threshold) && orderCount >= threshold) {
     const claimed = await pool.query(
-      `UPDATE customer_visits SET status = 'completed', counted = true, ended_at = NOW()
-        WHERE id = $1 AND status = 'open' RETURNING id`,
-      [visit.id]);
-    if (claimed.rowCount === 0) continue;
-
-    const bumped = await pool.query(
-      'UPDATE qr_code SET visit_count = visit_count + 1 WHERE id = $1 RETURNING visit_count',
-      [targetCard]);
-    visitCount = Number(bumped.rows[0].visit_count);
-
-    const who = card.rows[0].name || 'Client';
-    const canNotify = visitPhoneEligible(card.rows[0].phone);
-
-    // The reward is granted regardless of WhatsApp eligibility — reaching n/n
-    // must make it available immediately; only the notification is gated on
-    // the phone, mirroring the serveur-side notifyVisitUnlocks().
-    for (const reward of reaching.rows) {
-      const claim = await pool.query(
-        `INSERT INTO customer_rewards (qr_code_id, reward_id) VALUES ($1, $2)
-         ON CONFLICT DO NOTHING RETURNING id`,
-        [targetCard, reward.id]);
-      if (claim.rowCount === 0) continue; // already owned → do not announce twice
-      if (canNotify) {
+      `INSERT INTO customer_rewards (qr_code_id, reward_id)
+       VALUES ($1, $2)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [cardId, activeReward.id]
+    );
+    await pool.query(
+      `UPDATE customer_visits SET reward = true WHERE id = $1`,
+      [visit.id]
+    );
+    if (claimed.rowCount > 0) {
+      // Preserve the existing "you won a reward" WhatsApp notification and the
+      // cumulative qr_code.visit_count display when a reward is actually granted.
+      await pool.query(
+        `UPDATE qr_code SET visit_count = visit_count + 1 WHERE id = $1`,
+        [cardId]
+      );
+      const card = await pool.query('SELECT name, phone FROM qr_code WHERE id = $1', [cardId]);
+      if (card.rowCount > 0 && visitPhoneEligible(card.rows[0].phone)) {
+        const who = card.rows[0].name || clientName || 'Client';
         await queueVisitNotification(
-          targetCard, 'reward', `claim-${claim.rows[0].id}`,
-          `Bonjour ${who}, vous avez débloqué la récompense « ${reward.name} » 🎉🎉`,
+          cardId, 'reward', `claim-${claimed.rows[0].id}`,
+          `Bonjour ${who}, vous avez atteint ${threshold} visites et gagnez votre récompense : ${activeReward.name} !`,
           'sellamo_reward');
       }
     }
-
-    if (!canNotify) continue;
-    const next = await pool.query(
-      `SELECT name, required_visits FROM loyalty_rewards
-        WHERE is_active = true AND trigger_type = 'visits' AND required_visits > $1
-          AND (starts_at IS NULL OR starts_at <= NOW())
-          AND (ends_at IS NULL OR ends_at >= NOW())
-        ORDER BY required_visits ASC LIMIT 1`,
-      [visitCount]);
-
-    let message = `Bonjour ${who}, votre ${visitCount}e visite au café est enregistrée !`;
-    if (next.rowCount > 0) {
-      const remaining = Number(next.rows[0].required_visits) - visitCount;
-      if (remaining > 0) {
-        message += ` Il vous reste ${remaining} visite${remaining > 1 ? 's' : ''} pour : ${next.rows[0].name}.`;
-      }
-    }
-    await queueVisitNotification(
-      targetCard, 'visit', `visit-${visit.id}`, message, 'sellamo_visit');
+    return orderCount;
   }
 
-  return visitCount;
+  return orderCount;
 }
 
 /**
- * Public: the customer scans their card at a table. This is the primary way a
- * visit begins. The visit is COUNTED when the table is freed with "Sortire"
- * (or swept as stale after 12h), not here — a scan alone must never award.
+ * Public: report the card's current visit progress after a scan.
+ *
+ * Visits are counted on a loyalty-card PAYMENT (see processVisitForCardPayment),
+ * never on a scan, so this endpoint is read-only: it returns the card id and the
+ * card's cumulative visit_count so the page can refresh its counter.
  */
 app.post('/api/loyalty/visit/start', async (req, res) => {
-  const { token, numtable } = req.body || {};
+  const { token } = req.body || {};
   if (!token || typeof token !== 'string' || token.length < 24) {
     return res.status(400).json({ success: false, error: 'TOKEN_REQUIRED' });
   }
-  const table = Number(numtable);
-  if (!Number.isInteger(table) || table < 1) {
-    return res.status(400).json({ success: false, error: 'TABLE_REQUIRED' });
-  }
   try {
-    const result = await openVisitForToken(token, table);
-    if (result.error === 'NOT_FOUND') {
+    const cardResult = await pool.query(
+      'SELECT id, status, visit_count FROM qr_code WHERE token = $1',
+      [token]
+    );
+    if (cardResult.rowCount === 0 || cardResult.rows[0].status !== 'active') {
       return res.status(404).json({ success: false, error: 'NOT_FOUND' });
     }
-    if (result.error) {
-      return res.status(400).json({ success: false, error: result.error });
-    }
-    res.json({ success: true, ...result });
+    return res.json({
+      success: true,
+      cardId: cardResult.rows[0].id,
+      visitCount: Number(cardResult.rows[0].visit_count || 0),
+    });
   } catch (err) {
     console.error('POST /api/loyalty/visit/start error:', err);
-    res.status(500).json({ success: false, error: 'DB_ERROR' });
+    res.status(500).json({ success: false, error: 'Erreur serveur' });
   }
 });
 
@@ -852,17 +707,8 @@ app.post('/demander', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Cash order: no loyalty token on this route, but a customer may already
-    // have opened a visit on this receipt by scanning at this table. The order
-    // makes that visit valid and, if it completes a threshold, counts it now.
-    // cardId is null so every open visit on this receipt is considered.
-    // Non-fatal: never void a valid order.
-    try {
-      await recordVisitOrderForRecu(idrecu, null, numtable);
-    } catch (visitOrderErr) {
-      console.warn('Visit order not recorded (non-fatal):', visitOrderErr.message);
-    }
-
+    // Cash/order route carries no loyalty token, so it never counts a visit:
+    // visits are counted on a loyalty-card payment in /process-card-payment.
     res.json({ success: true, idrecu });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1094,6 +940,18 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
     discountedTotal = Math.round(totalNum * (100 - discountPercent) / 100 * 1000) / 1000;
   }
 
+  // Count this visit for the loyalty card BEFORE the payment writes its receipt
+  // and order: the "still at the cafe" rule must see the customer's previous
+  // open receipts, never the order this payment is placing right now.
+  try {
+    const visitCard = await pool.query('SELECT id, name FROM qr_code WHERE token = $1', [qrId]);
+    if (visitCard.rowCount > 0) {
+      await processVisitForCardPayment(visitCard.rows[0].id, visitCard.rows[0].name);
+    }
+  } catch (visitErr) {
+    console.warn('Visit counting failed (non-fatal):', visitErr.message);
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1210,29 +1068,15 @@ app.post('/process-card-payment', paymentLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
-    // recomponce.md §4 + §12: the payment is the moment the card is definitively
-    // bound to this table, so the visit is opened here — the customer never has to
-    // ask the waiter to associate their card. Must run AFTER COMMIT: openVisitForToken
-    // reads the receipt through its own pool connection and cannot see the row
-    // inserted above until this transaction commits. Idempotent (uq_customer_visit_open),
-    // and deliberately non-fatal — a visit hiccup must never void a valid payment.
+    // The visit itself was already counted before this payment wrote its receipt
+    // (processVisitForCardPayment). Return the card's cumulative visit_count so
+    // the page can refresh its counter.
     let visitCount;
     try {
-      const visitResult = await openVisitForToken(qrId, numtable);
-      if (visitResult.error) console.warn('Visit not opened:', visitResult.error);
-      else visitCount = visitResult.visitCount;
+      const counted = await pool.query('SELECT visit_count FROM qr_code WHERE id = $1', [customerRow.id]);
+      visitCount = Number(counted.rows[0]?.visit_count || 0);
     } catch (visitErr) {
-      console.warn('Visit not opened (non-fatal):', visitErr.message);
-    }
-
-    // The order is what makes the visit valid, so record it against the open
-    // visit — and if this order is the one that completes a `required_visits`
-    // threshold, count it here instead of waiting for "Sortire" (recomponce.md §6).
-    try {
-      const counted = await recordVisitOrderForRecu(idrecu, customerRow.id, numtable);
-      if (counted !== undefined) visitCount = counted;
-    } catch (visitOrderErr) {
-      console.warn('Visit order not recorded (non-fatal):', visitOrderErr.message);
+      console.warn('Visit count read failed (non-fatal):', visitErr.message);
     }
 
     const remainingPoints = Math.round((currentPoints - discountedTotal) * 100) / 100;
