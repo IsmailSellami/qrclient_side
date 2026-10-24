@@ -1,4 +1,4 @@
-﻿
+
 const categoryContainer = document.getElementById("categorie");
 const productContainer = document.getElementById("product");
 const titleEl = document.getElementById("name");
@@ -409,7 +409,7 @@ function createCard(product) {
     button.addEventListener("click", () => {
         addToCart(product, textarea.value);
         textarea.value = "";
-        showToast(`${product.idname} ajout├⌐ au panier Γ£à`);
+        showToast(`${product.idname} ajouté au panier ✅`);
     });
 
     food.appendChild(button);
@@ -540,7 +540,7 @@ async function sendOrder() {
 
     const prevText = demanderBtn.textContent;
     demanderBtn.disabled = true;
-    demanderBtn.textContent = "V├⌐rification...";
+    demanderBtn.textContent = "Vérification...";
 
     try {
         const isLocationValid = await verifierLocalisation();
@@ -554,7 +554,7 @@ async function sendOrder() {
         }
     } catch (_err) {
         console.error("Error in sendOrder:", _err);
-        showToast("Erreur de v├⌐rification. Veuillez r├⌐essayer.");
+        showToast("Erreur de vérification. Veuillez réessayer.");
     } finally {
         demanderBtn.disabled = false;
         demanderBtn.textContent = prevText;
@@ -694,18 +694,18 @@ async function loadPromotionBanner() {
     const res = await fetch('/api/promotions/banner');
     const data = await res.json();
     if (data.status === 'active') {
-      let text = `Promotion en cours ! -${data.discountPercent}% sur tous les achats avec la carte fid├⌐lit├⌐`;
+      let text = `Promotion en cours ! -${data.discountPercent}% sur tous les achats avec la carte fidélité`;
       if (data.minimumPurchaseAmount > 0) {
-        text += ` ΓÇö minimum ${data.minimumPurchaseAmount} DT`;
+        text += ` — minimum ${data.minimumPurchaseAmount} DT`;
       }
       promotionBanner.textContent = text;
       promotionBanner.className = 'promotion-banner promotion-banner--active';
       promotionBanner.style.display = 'block';
     } else if (data.status === 'soon') {
       const startDate = new Date(data.startDate).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      let text = `Bient├┤t disponible : -${data.discountPercent}% ├á partir du ${startDate}`;
+      let text = `Bientôt disponible : -${data.discountPercent}% à partir du ${startDate}`;
       if (data.minimumPurchaseAmount > 0) {
-        text += ` ΓÇö minimum ${data.minimumPurchaseAmount} DT`;
+        text += ` — minimum ${data.minimumPurchaseAmount} DT`;
       }
       promotionBanner.textContent = text;
       promotionBanner.className = 'promotion-banner promotion-banner--soon';
@@ -761,7 +761,7 @@ function renderLoyaltyInfo(info) {
     progressHtml = `
       <div class="loyalty-progress">
         <div class="loyalty-progress__label">
-          <span>${tier ? tier.name : 'D├⌐butant'}</span>
+          <span>${tier ? tier.name : 'Débutant'}</span>
           <span>${nextTier.name} (${nextMin} pts)</span>
         </div>
         <div class="loyalty-progress__bar">
@@ -773,13 +773,43 @@ function renderLoyaltyInfo(info) {
     progressHtml = `
       <div class="loyalty-progress">
         <div class="loyalty-progress__label"><span>${tier ? tier.name : 'Niveau maximal'}</span></div>
-        <div class="loyalty-progress__detail">${formatPoints(lifetime)} points cumul├⌐s ΓÇö Niveau maximal atteint !</div>
+        <div class="loyalty-progress__detail">${formatPoints(lifetime)} points cumulés — Niveau maximal atteint !</div>
       </div>`;
   }
 
   const tierBadgeHtml = tier
-    ? `<span class="loyalty-tier-badge" style="background:${tier.color || '#c49b63'}">${tier.icon || 'Γ¡É'} ${tier.name}</span>`
-    : `<span class="loyalty-tier-badge loyalty-tier-badge--default">Γ¡É D├⌐butant</span>`;
+    ? `<span class="loyalty-tier-badge" style="background:${tier.color || '#c49b63'}">${tier.icon || '⭐'} ${tier.name}</span>`
+    : `<span class="loyalty-tier-badge loyalty-tier-badge--default">⭐ Débutant</span>`;
+
+  // Visit streak: the counter is the durable count of COMPLETED table sessions
+  // this card has had. A scan only opens a visit; the number only moves when the
+  // table is freed, so it never counts a visit the customer did not complete.
+  const visitCount = Number(card.visitCount || 0);
+  const visitRewards = (loyaltyConfig?.rewards || []).filter(r => r.triggerType === 'visits');
+  const nextVisit = visitRewards
+    .filter(r => r.requiredVisits !== null && r.requiredVisits !== undefined && r.requiredVisits > visitCount)
+    .sort((a, b) => a.requiredVisits - b.requiredVisits)[0];
+  let visitHtml = '';
+  if (visitRewards.length > 0) {
+    const pct = nextVisit && nextVisit.requiredVisits > 0
+      ? Math.min(100, Math.round(visitCount / nextVisit.requiredVisits * 100))
+      : 100;
+    visitHtml = `
+      <div class="loyalty-visits">
+        <div class="loyalty-visits__label">
+          <span>☕ Visites</span>
+          <span>${visitCount}${nextVisit ? ` / ${nextVisit.requiredVisits}` : ''}</span>
+        </div>
+        <div class="loyalty-progress__bar">
+          <div class="loyalty-progress__fill" style="width:${pct}%;background:#6b8f71"></div>
+        </div>
+        <div class="loyalty-visits__detail">${
+          nextVisit
+            ? `Encore ${nextVisit.requiredVisits - visitCount} visite${nextVisit.requiredVisits - visitCount > 1 ? 's' : ''} pour : ${nextVisit.name}`
+            : 'Toutes les récompenses de visites sont débloquées !'
+        }</div>
+      </div>`;
+  }
 
   loyaltyInfoEl.innerHTML = `
     <div class="loyalty-info__header">
@@ -791,6 +821,7 @@ function renderLoyaltyInfo(info) {
       <span class="loyalty-info__points-label">points disponibles</span>
     </div>
     ${progressHtml}
+    ${visitHtml}
   `;
 }
 
@@ -812,24 +843,33 @@ function renderRewardSelection(configRewards, earnedRewards) {
   const hasPromotion = !!(activePromotion && activePromotion.active);
 
   const cardsHtml = available.map(r => {
-    let typeLabel = 'R├⌐compense';
-    if (r.rewardType === 'discount') typeLabel = `-${r.discountPercent}% de r├⌐duction`;
+    let typeLabel = 'Récompense';
+    if (r.rewardType === 'discount') typeLabel = `-${r.discountPercent}% de réduction`;
     else if (r.rewardType === 'free_item') typeLabel = r.productId ? `Article gratuit : ${r.productId} (0.00 DT)` : 'Article gratuit';
-    const note = (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0)
-      ? `<div class="reward-note">Vous avez choisi une r├⌐duction de ${r.discountPercent}%. La promotion sera remplac├⌐e.</div>`
-      : '';
+    const notes = [];
+    if (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0) {
+      notes.push(`<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`);
+    }
+    // R5: the catalog's window closed, but this reward was already EARNED, so it
+    // stays fully selectable. The badge is information for the customer, not a
+    // lock — removing the card here would silently confiscate a reward they are
+    // entitled to spend, which is exactly what the lifecycle rule forbids.
+    if (r.isExpired) {
+      notes.push(`<div class="reward-note reward-note--expired">Cette récompense a été gagnée avant la fin de sa période, mais reste valable et utilisable.</div>`);
+    }
     return `
-      <div class="reward-card" data-reward-id="${r.id}">
-        <div class="reward-card__name">${r.rewardName || r.name || 'R├⌐compense'}</div>
+      <div class="reward-card${r.isExpired ? ' reward-card--expired' : ''}" data-reward-id="${r.id}">
+        <div class="reward-card__name">${r.rewardName || r.name || 'Récompense'}</div>
         <div class="reward-card__type">${typeLabel}</div>
         ${r.mysteryResult ? `<div class="reward-card__mystery">${r.mysteryResult}</div>` : ''}
+        ${r.isExpired ? '<span class="reward-card__badge">Gagnée · hors période</span>' : ''}
       </div>
-      ${note}`;
+      ${notes.join('')}`;
   }).join('');
 
   rewardSelectionEl.innerHTML = `
-    <div class="reward-selection__title">≡ƒÄü R├⌐compenses disponibles</div>
-    <div class="reward-selection__hint">S├⌐lectionnez une r├⌐compense ├á appliquer (optionnel)</div>
+    <div class="reward-selection__title">🎁 Récompenses disponibles</div>
+    <div class="reward-selection__hint">Sélectionnez une récompense à appliquer (optionnel)</div>
     <div class="reward-selection__list">${cardsHtml}</div>
     <div id="rewardFreeOptions" class="reward-free-options" style="display:none;"></div>
   `;
@@ -842,7 +882,7 @@ function renderRewardSelection(configRewards, earnedRewards) {
     const freeName = info?.productId ? String(info.productId) : null;
     if (!freeName) { freeOptionsEl.style.display = 'none'; freeOptionsEl.innerHTML = ''; return; }
 
-    // The client types their own choice for a free reward ΓÇö we do NOT show the
+    // The client types their own choice for a free reward — we do NOT show the
     // categories/articles as selectable products. The typed text is stored directly
     // in orderr.option on confirmation.
     freeOptionsEl.style.display = 'block';
@@ -889,12 +929,13 @@ function renderRewardSelection(configRewards, earnedRewards) {
 function refreshConfirmButton() {
   if (!confirmPaymentBtn) return;
   const eff = getEffectivePaymentTotal();
-  confirmPaymentBtn.textContent = `Confirmer le paiement ΓÇö ${eff.toFixed(3)} DT`;
+  confirmPaymentBtn.textContent = `Confirmer le paiement — ${eff.toFixed(3)} DT`;
 }
 
 function resetLoyaltyUI() {
   if (loyaltyInfoEl) { loyaltyInfoEl.style.display = 'none'; loyaltyInfoEl.innerHTML = ''; }
   if (rewardSelectionEl) { rewardSelectionEl.style.display = 'none'; rewardSelectionEl.innerHTML = ''; }
+  if (visitCounterEl) { visitCounterEl.style.display = 'none'; }
   if (confirmPaymentBtn) confirmPaymentBtn.style.display = 'none';
   selectedRewardId = null;
   selectedRewardDiscount = 0;
@@ -911,7 +952,7 @@ async function showPaymentModal() {
     const meetsMinimum = !promo.minimumPurchaseAmount || pendingOrderTotal >= promo.minimumPurchaseAmount;
     if (meetsMinimum) {
       if (discountBanner) {
-        let bannerText = `≡ƒÄë Promotion ! -${promo.discountPercent}% sur tous les achats avec la carte fid├⌐lit├⌐`;
+        let bannerText = `🎉 Promotion ! -${promo.discountPercent}% sur tous les achats avec la carte fidélité`;
         if (promo.minimumPurchaseAmount) {
           bannerText += ` (min. ${promo.minimumPurchaseAmount} DT)`;
         }
@@ -923,7 +964,7 @@ async function showPaymentModal() {
     } else {
       activePromotion = null;
       if (discountBanner) {
-        discountBanner.textContent = `ΓÜá∩╕Å Promotion de -${promo.discountPercent}% disponible ΓÇö montant minimum : ${promo.minimumPurchaseAmount} DT (votre panier : ${pendingOrderTotal.toFixed(2)} DT)`;
+        discountBanner.textContent = `⚠️ Promotion de -${promo.discountPercent}% disponible — montant minimum : ${promo.minimumPurchaseAmount} DT (votre panier : ${pendingOrderTotal.toFixed(2)} DT)`;
         discountBanner.className = 'discount-banner discount-banner--warning';
         discountBanner.style.display = 'block';
       }
@@ -982,6 +1023,10 @@ function startQrScanner() {
   if (qrScannerRunning || qrStartPromise) return;
 
   qrStartPromise = (async () => {
+    // The preview is only shown while the camera actually runs (see
+    // stopQrScanner). html5-qrcode needs a visible container to size itself.
+    const readerEl = document.getElementById("qr-reader");
+    if (readerEl) readerEl.style.display = "block";
     try {
       if (await isNativeQrSupported()) {
         try {
@@ -1001,7 +1046,7 @@ function startQrScanner() {
     } catch (err) {
       console.error("[QR] camera start failed:", err);
       const detail = (err && err.message) ? " (" + err.message + ")" : "";
-      qrCameraError.textContent = "Impossible d'acc├⌐der ├á la cam├⌐ra. V├⌐rifiez les autorisations." + detail;
+      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations." + detail;
       qrCameraError.style.display = "block";
       if (qrRetryBtn) qrRetryBtn.style.display = "block";
       stopQrScanner();
@@ -1031,7 +1076,7 @@ function loadHtml5QrcodeLib() {
 
 async function requestCameraStream() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    throw new Error("Cam├⌐ra non disponible (connexion non s├⌐curis├⌐e ou navigateur non support├⌐)");
+    throw new Error("Caméra non disponible (connexion non sécurisée ou navigateur non supporté)");
   }
   const attempts = [
     { video: { facingMode: "environment" }, audio: false },
@@ -1187,13 +1232,17 @@ function stopQrScanner() {
   qrNativeInFlight = false;
   setTorchOff();
   if (qrFlashBtn) qrFlashBtn.style.display = "none";
+  // The camera is off: drop the frozen preview so it cannot push the loyalty
+  // info, the rewards and the confirm button off a small screen.
+  const readerEl = document.getElementById("qr-reader");
+  if (readerEl) readerEl.style.display = "none";
   qrScannerRunning = false;
 }
 
 function setTorchButton(on) {
   if (!qrFlashBtn) return;
   qrFlashBtn.classList.toggle("on", on);
-  qrFlashBtn.textContent = on ? "≡ƒÆí Flash : ON" : "≡ƒÆí Flash";
+  qrFlashBtn.textContent = on ? "💡 Flash : ON" : "💡 Flash";
 }
 
 function setTorchOff() {
@@ -1216,26 +1265,26 @@ async function toggleTorch() {
     if (qrNativeStream) {
       const track = qrNativeStream.getVideoTracks()[0];
       if (!track || !track.getCapabilities || !track.getCapabilities().torch) {
-        showToast("Flashlight non support├⌐ sur cet appareil");
+        showToast("Flashlight non supporté sur cet appareil");
         return;
       }
       await track.applyConstraints({ advanced: [{ torch: next }] });
     } else if (html5QrCode && qrScannerRunning) {
       const caps = html5QrCode.getRunningTrackCapabilities ? html5QrCode.getRunningTrackCapabilities() : null;
       if (!caps || !caps.torch) {
-        showToast("Flashlight non support├⌐ sur cet appareil");
+        showToast("Flashlight non supporté sur cet appareil");
         return;
       }
       await html5QrCode.applyVideoConstraints({ advanced: [{ torch: next }] });
     } else {
-      showToast("Cam├⌐ra non active");
+      showToast("Caméra non active");
       return;
     }
     qrTorchOn = next;
     setTorchButton(next);
   } catch (err) {
     console.warn("[torch] toggle failed:", err);
-    showToast("Flashlight non support├⌐ sur cet appareil");
+    showToast("Flashlight non supporté sur cet appareil");
     qrTorchOn = false;
     setTorchButton(false);
   }
@@ -1283,7 +1332,7 @@ async function handleCashPayment() {
     showCashModal();
   } catch (err) {
     console.error("Error creating order:", err);
-    showToast("Erreur lors de la cr├⌐ation de la commande. Veuillez r├⌐essayer.");
+    showToast("Erreur lors de la création de la commande. Veuillez réessayer.");
     pendingOrderItems = null;
     pendingOrderTotal = 0;
   }
@@ -1302,14 +1351,14 @@ async function verifyQrCode(qrId) {
   qrId = extractToken(qrId);
   if (!qrId) {
     qrResult.className = "qr-result error";
-    qrResult.textContent = "Aucun QR code d├⌐tect├⌐. Veuillez scanner la carte.";
+    qrResult.textContent = "Aucun QR code détecté. Veuillez scanner la carte.";
     qrResult.style.display = "block";
     qrCameraError.style.display = "none";
     return;
   }
 
   qrResult.className = "qr-result loading";
-  qrResult.textContent = "V├⌐rification en cours...";
+  qrResult.textContent = "Vérification en cours...";
   qrResult.style.display = "block";
   resetLoyaltyUI();
 
@@ -1320,8 +1369,8 @@ async function verifyQrCode(qrId) {
     if (!tokenRes.ok || !tokenData.points && tokenData.points !== 0) {
       qrResult.className = "qr-result error";
       qrResult.textContent = tokenData.error === "NOT_FOUND"
-        ? "Client introuvable. Veuillez r├⌐essayer ou contacter le g├⌐rant."
-        : "Erreur de v├⌐rification. Veuillez r├⌐essayer.";
+        ? "Client introuvable. Veuillez réessayer ou contacter le gérant."
+        : "Erreur de vérification. Veuillez réessayer.";
       qrResult.style.display = "block";
       qrCameraError.style.display = "none";
       return;
@@ -1359,7 +1408,7 @@ async function verifyQrCode(qrId) {
 
     pendingQrId = qrId;
     qrResult.className = "qr-result success";
-    qrResult.textContent = "Carte v├⌐rifi├⌐e !";
+    qrResult.textContent = "Carte vérifiée !";
     qrResult.style.display = "block";
     qrCameraError.style.display = "none";
 
@@ -1368,17 +1417,62 @@ async function verifyQrCode(qrId) {
       renderRewardSelection(loyaltyConfig?.rewards || [], loyaltyCustomerInfo?.rewards || []);
     }
 
+    // Start the visit. This is the PRIMARY way a visit begins (recomponce.md §4):
+    // the customer scans, the card is bound to this table's session, and the
+    // visit is counted when the waiter frees the table. Fire-and-forget on
+    // purpose — a visit-tracking hiccup must never block a valid payment.
+    startVisit(qrId);
+
     if (confirmPaymentBtn) {
-      confirmPaymentBtn.textContent = `Confirmer le paiement ΓÇö ${getEffectivePaymentTotal().toFixed(3)} DT`;
+      confirmPaymentBtn.textContent = `Confirmer le paiement — ${getEffectivePaymentTotal().toFixed(3)} DT`;
       confirmPaymentBtn.style.display = "block";
     }
 
   } catch (err) {
     console.error(err);
     qrResult.className = "qr-result error";
-    qrResult.textContent = "Erreur de connexion. Veuillez r├⌐essayer.";
+    qrResult.textContent = "Erreur de connexion. Veuillez réessayer.";
     qrResult.style.display = "block";
   }
+}
+
+/**
+ * Open (or re-confirm) this card's visit for the current table.
+ *
+ * Idempotent by design: scanning the same card again at the same table returns
+ * the same visit with created:false and does NOT increment anything, so one
+ * sitting counts once no matter how many times the customer re-scans. A failed
+ * visit call is logged, never surfaced — losing a visit must not cost the
+ * customer their payment.
+ */
+async function startVisit(token) {
+  try {
+    const res = await fetch("/api/loyalty/visit/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, numtable })
+    });
+    if (!res.ok) {
+      console.warn("Visit not started:", (await res.json().catch(() => ({}))).error);
+      return;
+    }
+    const data = await res.json();
+    if (data.visitCount !== undefined) renderVisitCounter(data.visitCount);
+  } catch (e) {
+    console.warn("Could not start visit:", e);
+  }
+}
+
+let visitCounterEl = null;
+
+function renderVisitCounter(visitCount) {
+  if (!visitCounterEl) visitCounterEl = document.getElementById("visitCounter");
+  if (!visitCounterEl) return;
+  // The element wraps the number in a <span>; only that node is replaced so the
+  // "☕ Visites :" label is not clobbered.
+  const numEl = visitCounterEl.querySelector("span") || visitCounterEl;
+  numEl.textContent = visitCount;
+  visitCounterEl.style.display = "inline-block";
 }
 
 async function processCardPaymentWithReward() {
@@ -1416,7 +1510,7 @@ async function processCardPaymentWithReward() {
       if (payData.error === "INSUFFICIENT_POINTS") {
         qrResult.textContent = "Points insuffisants. Veuillez recharger votre carte.";
       } else {
-        qrResult.textContent = "Erreur de paiement. Veuillez r├⌐essayer.";
+        qrResult.textContent = "Erreur de paiement. Veuillez réessayer.";
       }
       qrResult.style.display = "block";
       return;
@@ -1429,8 +1523,15 @@ async function processCardPaymentWithReward() {
       earnedPoints = displayTotal;
     }
 
+    // The visit itself is opened server-side by this payment (recomponce.md §4/§12).
+    // The scan-time startVisit() call can legitimately fail when the table has no
+    // open receipt yet, so trust the authoritative count the payment returns.
+    if (payData.visitCount !== undefined) {
+      renderVisitCounter(payData.visitCount);
+    }
+
     qrResult.className = "qr-result success";
-    qrResult.innerHTML = `Paiement r├⌐ussi ! Merci de votre visite.`;
+    qrResult.innerHTML = `Paiement réussi ! Merci de votre visite.`;
     qrResult.style.display = "block";
 
     if (loyaltyCustomerInfo && loyaltyCustomerInfo.card) {
@@ -1439,12 +1540,12 @@ async function processCardPaymentWithReward() {
       loyaltySummary.className = 'loyalty-summary';
       loyaltySummary.innerHTML = `
         <div class="loyalty-summary__row">
-          <span>D├⌐bit:</span><span>-${formatPoints(displayTotal)} DT</span>
+          <span>Débit:</span><span>-${formatPoints(displayTotal)} DT</span>
         </div>
         <div class="loyalty-summary__row">
           <span>Nouveau solde:</span><span>${formatPoints(newBalance)} DT</span>
         </div>
-        ${selectedRewardId ? '<div class="loyalty-summary__reward">≡ƒÄü R├⌐compense appliqu├⌐e</div>' : ''}
+        ${selectedRewardId ? '<div class="loyalty-summary__reward">🎁 Récompense appliquée</div>' : ''}
       `;
       qrResult.appendChild(loyaltySummary);
     }
@@ -1461,7 +1562,7 @@ async function processCardPaymentWithReward() {
   } catch (err) {
     console.error(err);
     qrResult.className = "qr-result error";
-    qrResult.textContent = "Erreur de connexion. Veuillez r├⌐essayer.";
+    qrResult.textContent = "Erreur de connexion. Veuillez réessayer.";
     qrResult.style.display = "block";
   } finally {
     if (confirmPaymentBtn) confirmPaymentBtn.disabled = false;
@@ -1514,7 +1615,7 @@ function verifierLocalisation() {
                         if (data.authorized) {
                             resolve(true);
                         } else {
-                            console.log("Position refus├⌐e par le serveur");
+                            console.log("Position refusée par le serveur");
                             showToast("Please entre to the coffe");
                             resolve(false);
                         }
@@ -1525,7 +1626,7 @@ function verifierLocalisation() {
                     }
                 },
                 (error) => {
-                    console.log("GPS refus├⌐ ou erreur:", error);
+                    console.log("GPS refusé ou erreur:", error);
 
                     if (error.code === 1) {
                         showToast("Location is blocked. To confirm your order you must allow GPS access in your browser settings.");
@@ -1541,7 +1642,7 @@ function verifierLocalisation() {
                     if (attempt < MAX_RETRIES) {
                         setTimeout(tryGetPosition, 1500);
                     } else {
-                        showToast("Unable to verify your location. Veuillez r├⌐essayer.");
+                        showToast("Unable to verify your location. Veuillez réessayer.");
                         resolve(false);
                     }
                 },

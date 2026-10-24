@@ -1,72 +1,43 @@
-{"$schema":  "https://openapi.vercel.sh/vercel.json",
-    "outputDirectory":  "public",
-    "rewrites":  [
-                     {
-                         "source":  "/(.*)",
-                         "destination":  "/api/index"
-                     }
-                 ],
-    "headers":  [
-                    {
-                        "source":  "/api/(.*)",
-                        "headers":  [
-                                        {
-                                            "key":  "Cache-Control",
-                                            "value":  "no-store, must-revalidate"
-                                        }
-                                    ]
-                    },
-                    {
-                        "source":  "/",
-                        "headers":  [
-                                        {
-                                            "key":  "Cache-Control",
-                                            "value":  "no-cache, must-revalidate"
-                                        },
-                                        {
-                                            "key":  "Content-Security-Policy",
-                                            "value":  "default-src \u0027self\u0027;script-src \u0027self\u0027 https://cdn.jsdelivr.net;style-src \u0027self\u0027 \u0027unsafe-inline\u0027;img-src \u0027self\u0027 data: https://ewciynnuevuzbcrwcjut.supabase.co https://i.postimg.cc;connect-src \u0027self\u0027;font-src \u0027self\u0027 data:;form-action \u0027self\u0027;base-uri \u0027self\u0027;frame-ancestors \u0027none\u0027;upgrade-insecure-requests;object-src \u0027none\u0027;script-src-attr \u0027none\u0027"
-                                        }
-                                    ]
-                    },
-                    {
-                        "source":  "/(.*\\.(?:css|js|mjs|ico|png|jpg|jpeg|svg|gif|webp|woff2?))",
-                        "headers":  [
-                                        {
-                                            "key":  "Cache-Control",
-                                            "value":  "public, max-age=86400"
-                                        }
-                                    ]
-                    },
-                    {
-                        "source":  "/(.*)",
-                        "headers":  [
-                                        {
-                                            "key":  "X-Content-Type-Options",
-                                            "value":  "nosniff"
-                                        },
-                                        {
-                                            "key":  "X-Frame-Options",
-                                            "value":  "DENY"
-                                        },
-                                        {
-                                            "key":  "Referrer-Policy",
-                                            "value":  "strict-origin-when-cross-origin"
-                                        },
-                                        {
-                                            "key":  "Strict-Transport-Security",
-                                            "value":  "max-age=31536000; includeSubDomains"
-                                        },
-                                        {
-                                            "key":  "Permissions-Policy",
-                                            "value":  "camera=self, geolocation=self, microphone=(), interest-cohort=()"
-                                        }
-                                    ]
-                    }
-                ],
-    "functions":  {
-                      "api/index.js":  {
-                                           "maxDuration":  30
-                                       }
-                  }
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, must-revalidate" },
+        { "key": "Content-Security-Policy", "value": "default-src 'self';script-src 'self' https://cdn.jsdelivr.net;style-src 'self' 'unsafe-inline';img-src 'self' data: https://ewciynnuevuzbcrwcjut.supabase.co https://i.postimg.cc;connect-src 'self';font-src 'self' data:;form-action 'self';base-uri 'self';frame-ancestors 'none';upgrade-insecure-requests;object-src 'none';script-src-attr 'none'" }
+      ]
+    },
+    {
+      "source": "/(.*\\.(?:css|js|mjs|ico|png|jpg|jpeg|svg|gif|webp|woff2?))",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains" },
+        { "key": "Permissions-Policy", "value": "camera=self, geolocation=self, microphone=(), interest-cohort=()" }
+      ]
+    }
+  ],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 30
+    }
+  }
 }
