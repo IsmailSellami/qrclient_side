@@ -1,13 +1,29 @@
 import pg from 'pg';
 import { createClient } from '@supabase/supabase-js';
 
+export function getConnectionString(connectionString) {
+  if (!connectionString) return connectionString;
+  const url = new URL(connectionString);
+  // This app uses explicit transactions and unnamed queries, with no session
+  // state. Share backend connections instead of reserving a session per client.
+  if (url.hostname.endsWith('.pooler.supabase.com') && (!url.port || url.port === '5432')) {
+    url.port = '6543';
+    return url.toString();
+  }
+  return connectionString;
+}
+
 export const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: getConnectionString(process.env.DATABASE_URL),
   ssl: { rejectUnauthorized: false },
-  max: 2,
-  idleTimeoutMillis: 30000,
+  max: 1,
+  idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 10000,
+  allowExitOnIdle: true,
 });
+
+// pg removes the failed idle client; a later query can open a new connection.
+pool.on('error', err => console.error('Idle database connection failed:', err.message));
 
 export const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)

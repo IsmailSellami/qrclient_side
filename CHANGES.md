@@ -38,7 +38,7 @@ Dependencies, environment files, images, and existing Vercel state were retained
 
 The two approximately 1,200-line backend copies are now thin entry points importing one app and one database module. Routes, payment validation, visit/reward processing, security middleware, and notifications have one implementation. Product pricing and promotion lookup are shared helpers. Local transactions now use checked-out pool connections rather than a shared global client.
 
-The removed `/api/loyalty/visit/start` endpoint was read-only and existed to refresh the removed display. Actual card-payment visit counting, reward-cycle state, reward grants, and reward notifications remain. Visit work uses the payment connection and savepoints so a visit failure cannot poison the payment transaction or exhaust the two-connection pool.
+The removed `/api/loyalty/visit/start` endpoint was read-only and existed to refresh the removed display. Actual card-payment visit counting, reward-cycle state, reward grants, and reward notifications remain. Visit work uses the payment connection and savepoints so a visit failure cannot poison the payment transaction or wait for another pool connection.
 
 Cash creation uses database product prices with no promotion lookup. Cash confirmation reads saved line amounts and ignores a browser-supplied discounted amount. Card payments calculate eligibility and discounts on the server; an earned discount replaces the promotion, and free reward items remain zero-price lines. Receipts accumulate new charges instead of overwriting earlier orders. Point deductions, receipts, and order-line sums agree at the database's existing two-decimal precision (`orderr.prix` and `recu.totale` were inspected).
 
@@ -74,3 +74,11 @@ Run `npm test` for backend regressions. Browser verification uses a separate Pla
 - Small phones in portrait/landscape: expanded/collapsed browser toolbars, home-indicator safe area, software keyboard, and long-cart scrolling. Desktop emulation cannot reproduce every mobile viewport behavior.
 - The available Windows WebKit runtime stalled creating a test page and could not provide Safari verification. No WebKit or real-iPhone pass is claimed.
 - After a Vercel deployment, smoke-test static assets, the original request paths through rewrites, and HTTPS camera permissions on the hosted URL. Local entry-point and tracing checks do not replace a hosted smoke test.
+
+## Database connection limit fix
+
+The Supabase session pooler on port 5432 rejected connections with EMAXCONNSESSION (pool size 15). The shared database module now uses port 6543 for Supabase shared-pooler session URLs, retaining the host, credentials, database, and query parameters. Direct/custom database URLs stay unchanged. Both local and Vercel entry points use this setting; no .env edit is required. This app uses unnamed queries and explicit transactions, with no session-only SQL features.
+
+The application pool now allows one connection per process, releases idle connections after 10 seconds, and handles idle connection errors. Local shutdown drains HTTP requests before ending the pool; SIGINT/SIGTERM are handled, as is nodemon SIGUSR2 on platforms that support it. Windows nodemon retains its original restart command.
+
+Verification: live transaction-pool connection, BEGIN/SAVEPOINT/ROLLBACK, local startup, HTTP 200 responses for health/products/loyalty config, and idle client count dropping from 1 to 0. All 36 Node test entries passed, including endpoint preservation and shutdown-drain regression checks. No real checkout or customer-data changes were made. See [Supabase pooling guidance](https://supabase.com/docs/guides/database/connecting-to-postgres).
