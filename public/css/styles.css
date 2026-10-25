@@ -258,9 +258,12 @@ textarea:focus {
 
 .cart-drawer{
     position: fixed;
-    top: 0;
+    top: var(--cart-top, 0px);
     right: 0;
     height: 100vh;
+    height: var(--cart-height, 100dvh);
+    box-sizing: border-box;
+    overflow: hidden;
     width: min(420px, 92vw);
     background: #fff;
     box-shadow: -10px 0 30px rgba(0,0,0,0.25);
@@ -276,10 +279,12 @@ textarea:focus {
 }
 
 .cart-header{
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 16px;
+    padding-top: max(16px, env(safe-area-inset-top, 0px));
     border-bottom: 1px solid #e5e7eb;
 }
 
@@ -299,7 +304,10 @@ textarea:focus {
 .cart-items{
     padding: 12px 16px;
     overflow: auto;
-    flex: 1;
+    flex: 1 1 0;
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
 }
 
 .cart-item{
@@ -353,7 +361,10 @@ textarea:focus {
 }
 
 .cart-footer{
+    flex: 0 0 auto;
+    background: #fff;
     padding: 14px 16px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
     border-top: 1px solid #e5e7eb;
 }
 
@@ -895,35 +906,6 @@ textarea{
   box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
 }
 
-.reward-card__badge {
-  display: inline-block;
-  margin-top: 6px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #fef3c7;
-  color: #92400e;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.reward-note--expired {
-  background: #fffbeb;
-  border-color: #fcd34d;
-  color: #92400e;
-}
-
-.visit-counter {
-  display: inline-block;
-  margin: 8px 0;
-  padding: 8px 16px;
-  border-radius: 12px;
-  background: #f0f7f2;
-  border: 1px solid #cfe3d4;
-  color: #2f5d3f;
-  font-size: 14px;
-  font-weight: 600;
-}
-
 .loyalty-visits {
   margin-top: 12px;
   padding-top: 12px;
@@ -1049,14 +1031,9 @@ textarea{
   font-weight: 600;
   text-align: center;
 }
-
-/* ===== Payment Loyalty Reward (in payment modal) ===== */
-.payment-loyalty-reward {
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-  margin-bottom: 12px;
-  font-size: 14px;
-  color: #166534;
+body.cart-open { overflow: hidden; }
+@media (max-height: 320px) {
+  /* At extreme zoom/keyboard heights, allow the entire drawer to scroll. */
+  .cart-drawer { overflow-y: auto; }
+  .cart-items { flex: 1 0 auto; overflow: visible; }
 }

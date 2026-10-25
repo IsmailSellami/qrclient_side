@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>sellami menu</title>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="preconnect" href="https://i.postimg.cc">
@@ -73,7 +73,6 @@
       <span>Total à payer :</span>
       <span id="paymentTotalAmount"></span>
     </div>
-    <div id="paymentLoyaltyReward" class="payment-loyalty-reward" style="display:none;"></div>
     <div class="payment-options">
       <button id="payCard" class="btn payment-btn payment-btn--card">
         <span class="payment-btn__icon">&#128179;</span>
@@ -95,12 +94,9 @@
   </div>
   <div class="modal__body">
     <div id="qr-reader"></div>
-    <button id="qrFlashBtn" class="qr-flash-btn" type="button" style="display:none;">💡 Flash</button>
+    <button id="qrFlashBtn" aria-pressed="false" class="qr-flash-btn" type="button" style="display:none;">Allumer la lampe</button>
     <div id="qrResult" class="qr-result" aria-hidden="true"></div>
     <div id="loyaltyInfo" class="loyalty-info" style="display:none;"></div>
-<!-- Kept OUTSIDE #loyaltyInfo: renderLoyaltyInfo() replaces that element's
-     innerHTML, which would destroy a counter nested inside it. -->
-<div id="visitCounter" class="visit-counter" style="display:none;">☕ Visites : <span>0</span></div>
     <div id="rewardSelection" class="reward-selection" style="display:none;"></div>
     <button id="confirmPaymentBtn" class="btn btn--primary qr-verify-btn" type="button" style="display:none;">Confirmer le paiement</button>
     <div id="qrCameraError" class="qr-result error" aria-hidden="true" style="display:none;"></div>

@@ -1,4 +1,4 @@
-
+﻿
 const categoryContainer = document.getElementById("categorie");
 const productContainer = document.getElementById("product");
 const titleEl = document.getElementById("name");
@@ -37,6 +37,9 @@ let qrNativeRafId = null;
 let qrNativeVideo = null;
 let qrNativeInFlight = false;
 let qrStartPromise = null;
+let qrStopPromise = Promise.resolve();
+let qrScannerGeneration = 0;
+let qrLibraryStarting = false;
 let html5QrcodeLibPromise = null;
 
 const cashOverlay = document.getElementById("cashOverlay");
@@ -45,7 +48,6 @@ const cashOk = document.getElementById("cashOk");
 
 const discountBanner = document.getElementById("discountBanner");
 const paymentTotalAmount = document.getElementById("paymentTotalAmount");
-const paymentLoyaltyReward = document.getElementById("paymentLoyaltyReward");
 const loyaltyInfoEl = document.getElementById("loyaltyInfo");
 const rewardSelectionEl = document.getElementById("rewardSelection");
 const confirmPaymentBtn = document.getElementById("confirmPaymentBtn");
@@ -73,7 +75,7 @@ const caractereImg = document.getElementById("caractereImg");
 const caractereOptions = document.getElementById("caractereOptions");
 const promotionBanner = document.getElementById("promotionBanner");
 const params = new URLSearchParams(window.location.search);
-const numtable = Number(params.get("table")) || 60;
+const numtable = Number(params.get("table")) || 12;
 
 console.log("TABLE =", numtable);
 let selectedCategory = "Tous";
@@ -270,8 +272,20 @@ function getProductByKey(productKey) {
     return products.find((p) => getProductKey(p) === productKey);
 }
 
+function updateCartViewport() {
+    if (!cartDrawer) return;
+    const viewport = window.visualViewport;
+    cartDrawer.style.setProperty('--cart-height', (viewport ? viewport.height : window.innerHeight) + 'px');
+    cartDrawer.style.setProperty('--cart-top', (viewport ? viewport.offsetTop : 0) + 'px');
+}
+window.addEventListener('resize', updateCartViewport);
+window.visualViewport?.addEventListener('resize', updateCartViewport);
+window.visualViewport?.addEventListener('scroll', updateCartViewport);
+
 function setCartOpen(isOpen) {
     if (!cartDrawer || !cartOverlay) return;
+    updateCartViewport();
+    document.body.classList.toggle("cart-open", isOpen);
     cartDrawer.classList.toggle("open", isOpen);
     cartOverlay.classList.toggle("open", isOpen);
     cartDrawer.setAttribute("aria-hidden", String(!isOpen));
@@ -587,7 +601,7 @@ async function submitOrderToBackend() {
     }
 
     lastOrderIdrecu = data.idrecu;
-    lastOrderTotal = pendingOrderTotal;
+    lastOrderTotal = data.total;
 
     return data.idrecu;
 }
@@ -619,7 +633,7 @@ async function fetchActivePromotion() {
 
 function getDiscountedTotal(originalTotal, discountPercent) {
   if (!discountPercent || discountPercent <= 0) return originalTotal;
-  return Math.round(originalTotal * (100 - discountPercent) / 100 * 1000) / 1000;
+  return Math.round((originalTotal * (100 - discountPercent) / 100 + Number.EPSILON) * 100) / 100;
 }
 
 // Format a loyalty point value to a maximum of 2 decimal places (e.g. 12.00008
@@ -672,20 +686,16 @@ function getOrderBaseTotal() {
     .reduce((sum, it) => sum + (getCartItemPrice(it.idname) || 0), 0);
 }
 
-// Single source of truth for the final payable amount.
-// A discount reward REPLACES any active promotion (they are never combined).
-function computeFinalTotal(baseTotal) {
-  if (selectedRewardId && selectedRewardDiscount > 0) {
-    return getDiscountedTotal(baseTotal, selectedRewardDiscount);
-  }
-  if (activePromotion && activePromotion.active) {
-    return getDiscountedTotal(baseTotal, activePromotion.discountPercent);
-  }
-  return baseTotal;
-}
-
+// A discount reward replaces the promotion. Sum rounded lines like the backend.
 function getEffectivePaymentTotal() {
-  return computeFinalTotal(getOrderBaseTotal());
+  const freeName = getFreeItemIdname();
+  const base = getOrderBaseTotal();
+  const percent = selectedRewardDiscount > 0 ? selectedRewardDiscount
+    : activePromotion?.active && base >= Number(activePromotion.minimumPurchaseAmount || 0)
+      ? Number(activePromotion.discountPercent) : 0;
+  return Math.round((pendingOrderItems || [])
+    .filter(item => String(item.idname) !== freeName)
+    .reduce((sum, item) => sum + Math.round((getCartItemPrice(item.idname) * (100 - percent) / 100 + Number.EPSILON) * 100) / 100, 0) * 100) / 100;
 }
 
 async function loadPromotionBanner() {
@@ -718,14 +728,10 @@ async function loadPromotionBanner() {
   }
 }
 
-function updatePaymentTotalDisplay(originalTotal, discountPercent) {
-  if (!paymentTotalAmount) return;
-  if (discountPercent && discountPercent > 0) {
-    const discounted = getDiscountedTotal(originalTotal, discountPercent);
-    paymentTotalAmount.innerHTML = `${discounted.toFixed(3)} DT <span class="original-price">${originalTotal.toFixed(3)} DT</span>`;
-  } else {
-    paymentTotalAmount.textContent = `${originalTotal.toFixed(3)} DT`;
-  }
+function updatePaymentTotalDisplay(originalTotal) {
+  if (paymentTotalAmount) paymentTotalAmount.textContent = originalTotal.toFixed(3) + ' DT';
+  if (payCashBtn) payCashBtn.querySelector('.payment-btn__label').textContent = 'Espèces — ' + originalTotal.toFixed(3) + ' DT';
+  if (payCardBtn) payCardBtn.querySelector('.payment-btn__label').textContent = 'Carte fidélité — ' + getEffectivePaymentTotal().toFixed(3) + ' DT';
 }
 
 async function loadLoyaltyConfig() {
@@ -797,7 +803,7 @@ function renderLoyaltyInfo(info) {
     visitHtml = `
       <div class="loyalty-visits">
         <div class="loyalty-visits__label">
-          <span>☕ Visites</span>
+
           <span>${visitCount}${nextVisit ? ` / ${nextVisit.requiredVisits}` : ''}</span>
         </div>
         <div class="loyalty-progress__bar">
@@ -825,7 +831,7 @@ function renderLoyaltyInfo(info) {
   `;
 }
 
-function renderRewardSelection(configRewards, earnedRewards) {
+function renderRewardSelection(earnedRewards) {
   if (!rewardSelectionEl) return;
   rewardSelectionEl.innerHTML = '';
   rewardSelectionEl.style.display = 'none';
@@ -850,19 +856,12 @@ function renderRewardSelection(configRewards, earnedRewards) {
     if (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0) {
       notes.push(`<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`);
     }
-    // R5: the catalog's window closed, but this reward was already EARNED, so it
-    // stays fully selectable. The badge is information for the customer, not a
-    // lock — removing the card here would silently confiscate a reward they are
-    // entitled to spend, which is exactly what the lifecycle rule forbids.
-    if (r.isExpired) {
-      notes.push(`<div class="reward-note reward-note--expired">Cette récompense a été gagnée avant la fin de sa période, mais reste valable et utilisable.</div>`);
-    }
+    // Earned rewards remain selectable after their catalog period ends.
     return `
       <div class="reward-card${r.isExpired ? ' reward-card--expired' : ''}" data-reward-id="${r.id}">
         <div class="reward-card__name">${r.rewardName || r.name || 'Récompense'}</div>
         <div class="reward-card__type">${typeLabel}</div>
         ${r.mysteryResult ? `<div class="reward-card__mystery">${r.mysteryResult}</div>` : ''}
-        ${r.isExpired ? '<span class="reward-card__badge">Gagnée · hors période</span>' : ''}
       </div>
       ${notes.join('')}`;
   }).join('');
@@ -935,7 +934,6 @@ function refreshConfirmButton() {
 function resetLoyaltyUI() {
   if (loyaltyInfoEl) { loyaltyInfoEl.style.display = 'none'; loyaltyInfoEl.innerHTML = ''; }
   if (rewardSelectionEl) { rewardSelectionEl.style.display = 'none'; rewardSelectionEl.innerHTML = ''; }
-  if (visitCounterEl) { visitCounterEl.style.display = 'none'; }
   if (confirmPaymentBtn) confirmPaymentBtn.style.display = 'none';
   selectedRewardId = null;
   selectedRewardDiscount = 0;
@@ -946,7 +944,14 @@ function resetLoyaltyUI() {
 
 async function showPaymentModal() {
   setModal(paymentModal, paymentOverlay, true);
+  payCardBtn.disabled = true;
+  payCashBtn.disabled = true;
+  activePromotion = null;
+  updatePaymentTotalDisplay(pendingOrderTotal);
   const promo = await fetchActivePromotion();
+  payCardBtn.disabled = false;
+  payCashBtn.disabled = false;
+  if (!paymentModal.classList.contains("open")) return;
   if (promo && promo.active) {
     activePromotion = promo;
     const meetsMinimum = !promo.minimumPurchaseAmount || pendingOrderTotal >= promo.minimumPurchaseAmount;
@@ -960,7 +965,7 @@ async function showPaymentModal() {
         discountBanner.className = 'discount-banner';
         discountBanner.style.display = 'block';
       }
-      updatePaymentTotalDisplay(pendingOrderTotal, promo.discountPercent);
+      updatePaymentTotalDisplay(pendingOrderTotal);
     } else {
       activePromotion = null;
       if (discountBanner) {
@@ -968,12 +973,12 @@ async function showPaymentModal() {
         discountBanner.className = 'discount-banner discount-banner--warning';
         discountBanner.style.display = 'block';
       }
-      updatePaymentTotalDisplay(pendingOrderTotal, 0);
+      updatePaymentTotalDisplay(pendingOrderTotal);
     }
   } else {
     activePromotion = null;
     if (discountBanner) discountBanner.style.display = 'none';
-    updatePaymentTotalDisplay(pendingOrderTotal, 0);
+    updatePaymentTotalDisplay(pendingOrderTotal);
   }
 }
 
@@ -1020,41 +1025,46 @@ function hideCashModal() {
 /* ===== QR Code Camera Scanner ===== */
 
 function startQrScanner() {
-  if (qrScannerRunning || qrStartPromise) return;
-
+  if (!qrModal.classList.contains('open') || qrScannerRunning) return qrStartPromise;
+  if (qrStartPromise) return qrStartPromise.then(() => startQrScanner());
+  const generation = qrScannerGeneration;
+  const current = () => generation === qrScannerGeneration && qrModal.classList.contains('open');
   qrStartPromise = (async () => {
-    // The preview is only shown while the camera actually runs (see
-    // stopQrScanner). html5-qrcode needs a visible container to size itself.
-    const readerEl = document.getElementById("qr-reader");
-    if (readerEl) readerEl.style.display = "block";
+    await qrStopPromise;
+    if (!current()) return;
+    const readerEl = document.getElementById('qr-reader');
+    readerEl.style.display = 'block';
     try {
-      if (await isNativeQrSupported()) {
-        try {
-          await startNativeQrScanner();
-        } catch (nativeErr) {
-          console.warn("[QR] native path failed, falling back to html5:", nativeErr);
+      const native = await isNativeQrSupported();
+      if (!current()) return;
+      if (native) {
+        try { await startNativeQrScanner(current); }
+        catch (err) {
+          // A failed native start can already own a stream.
+          qrNativeStream?.getTracks().forEach(track => track.stop());
+          qrNativeStream = null;
+          qrNativeVideo = null;
+          if (!current()) return;
           await loadHtml5QrcodeLib();
-          await startHtml5QrScanner();
+          if (current()) await startHtml5QrScanner(current);
         }
       } else {
         await loadHtml5QrcodeLib();
-        await startHtml5QrScanner();
+        if (current()) await startHtml5QrScanner(current);
       }
+      if (!current()) { await stopQrScanner(); return; }
       qrScannerRunning = true;
-      qrCameraError.style.display = "none";
+      qrCameraError.style.display = 'none';
       refreshFlashButton();
     } catch (err) {
-      console.error("[QR] camera start failed:", err);
-      const detail = (err && err.message) ? " (" + err.message + ")" : "";
-      qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations." + detail;
-      qrCameraError.style.display = "block";
-      if (qrRetryBtn) qrRetryBtn.style.display = "block";
-      stopQrScanner();
-    } finally {
-      qrStartPromise = null;
-    }
+      if (current()) {
+        qrCameraError.textContent = "Impossible d'accéder à la caméra. Vérifiez les autorisations.";
+        qrCameraError.style.display = 'block';
+        qrRetryBtn.style.display = 'block';
+      }
+      await stopQrScanner();
+    } finally { qrStartPromise = null; }
   })();
-
   return qrStartPromise;
 }
 
@@ -1067,7 +1077,7 @@ function loadHtml5QrcodeLib() {
     s.src = "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js";
     s.async = true;
     s.onload = () => (window.Html5Qrcode ? resolve() : reject(new Error("Html5Qrcode missing")));
-    s.onerror = () => reject(new Error("Scanner library failed to load"));
+    s.onerror = () => { html5QrcodeLibPromise = null; s.remove(); reject(new Error("Scanner library failed to load")); };
     document.head.appendChild(s);
   });
 
@@ -1105,7 +1115,7 @@ async function isNativeQrSupported() {
   }
 }
 
-async function startNativeQrScanner() {
+async function startNativeQrScanner(current) {
   if (qrScannerRunning) return;
 
   const container = document.getElementById("qr-reader");
@@ -1123,9 +1133,11 @@ async function startNativeQrScanner() {
   qrNativeDetector = new BarcodeDetector({ formats: ["qr_code"] });
 
   const stream = await requestCameraStream();
+  if (!current()) { stream.getTracks().forEach(track => track.stop()); return; }
   qrNativeStream = stream;
   video.srcObject = stream;
   await video.play();
+  if (!current()) return;
 
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -1165,14 +1177,15 @@ async function startNativeQrScanner() {
   scheduleNext();
 }
 
-async function startHtml5QrScanner() {
+async function startHtml5QrScanner(current) {
   if (qrScannerRunning) return;
   if (typeof Html5Qrcode === "undefined") throw new Error("Html5Qrcode not loaded");
 
   const container = document.getElementById("qr-reader");
   if (container) clearElement(container);
 
-  html5QrCode = new Html5Qrcode("qr-reader");
+  const scanner = new Html5Qrcode("qr-reader");
+  html5QrCode = scanner;
 
   const config = {
     fps: 30,
@@ -1185,144 +1198,135 @@ async function startHtml5QrScanner() {
     disableFlip: true,
   };
 
-  await html5QrCode.start(
-    { facingMode: "environment" },
-    config,
-    onQrScanned,
-    (errorMessage) => { console.log("[QR] scan error:", errorMessage); }
-  );
+  qrLibraryStarting = true;
+  try {
+    await scanner.start(
+      { facingMode: "environment" },
+      config,
+      onQrScanned,
+      () => {}
+    );
+  } finally {
+    qrLibraryStarting = false;
+  }
+  if (!current()) {
+    html5QrCode = scanner;
+    await stopQrScanner();
+  }
+}
+
+function getActiveCameraTrack() {
+  const stream = qrNativeStream || document.querySelector('#qr-reader video')?.srcObject;
+  return stream?.getVideoTracks().find(track => track.readyState === 'live') || null;
+}
+
+function trackSupportsTorch(track) {
+  try {
+    const capability = track?.getCapabilities?.().torch;
+    if (capability !== undefined) return capability === true || (Array.isArray(capability) && capability.includes(true));
+    return typeof track?.getSettings?.().torch === 'boolean';
+  } catch { return false; }
+}
+
+function torchConstraints(track, on) {
+  return { ...track.getConstraints?.(), torch: on, advanced: [{ torch: on }] };
 }
 
 function stopQrScanner() {
-  if (html5QrCode && qrScannerRunning) {
-    try {
-      html5QrCode.stop().then(() => {
-        try { html5QrCode.clear(); } catch {}
-        qrScannerRunning = false;
-      }).catch(() => { qrScannerRunning = false; });
-    } catch (e) {
-      qrScannerRunning = false;
-    }
+  qrScannerGeneration++;
+  const track = getActiveCameraTrack();
+  // Request off before releasing the stream; stop() also releases the hardware.
+  if (trackSupportsTorch(track)) {
+    try { void track.applyConstraints(torchConstraints(track, false)).catch(() => {}); } catch {}
   }
-
-  if (qrNativeVideo && qrNativeRafId) {
-    try {
-      if (typeof qrNativeVideo.cancelVideoFrameCallback === "function") {
-        qrNativeVideo.cancelVideoFrameCallback(qrNativeRafId);
-      } else {
-        cancelAnimationFrame(qrNativeRafId);
-      }
-    } catch {}
+  const streams = new Set([qrNativeStream, document.querySelector('#qr-reader video')?.srcObject]);
+  for (const stream of streams) stream?.getTracks().forEach(t => t.stop());
+  if (qrNativeVideo && qrNativeRafId !== null) {
+    if (typeof qrNativeVideo.cancelVideoFrameCallback === 'function') qrNativeVideo.cancelVideoFrameCallback(qrNativeRafId);
+    else cancelAnimationFrame(qrNativeRafId);
   }
   qrNativeRafId = null;
-
-  if (qrNativeStream) {
-    try {
-      qrNativeStream.getTracks().forEach((t) => t.stop());
-    } catch {}
-    qrNativeStream = null;
-  }
-
-  if (qrNativeVideo) {
-    try { qrNativeVideo.srcObject = null; } catch {}
-    qrNativeVideo = null;
-  }
-
+  if (qrNativeVideo) qrNativeVideo.srcObject = null;
+  qrNativeStream = null;
+  qrNativeVideo = null;
   qrNativeDetector = null;
   qrNativeInFlight = false;
-  setTorchOff();
-  if (qrFlashBtn) qrFlashBtn.style.display = "none";
-  // The camera is off: drop the frozen preview so it cannot push the loyalty
-  // info, the rewards and the confirm button off a small screen.
-  const readerEl = document.getElementById("qr-reader");
-  if (readerEl) readerEl.style.display = "none";
   qrScannerRunning = false;
+  qrTorchOn = false;
+  setTorchButton(false);
+  qrFlashBtn.style.display = 'none';
+  document.getElementById('qr-reader').style.display = 'none';
+  // Clearing html5-qrcode while start() owns a pending permission request can
+  // detach its video before it attaches the stream. Finish cleanup after start.
+  const scanner = qrLibraryStarting ? null : html5QrCode;
+  if (!qrLibraryStarting) html5QrCode = null;
+  const previousStop = qrStopPromise;
+  qrStopPromise = (async () => {
+    await previousStop;
+    if (scanner) {
+      try { await scanner.stop(); } catch {}
+      try { scanner.clear(); } catch {}
+    }
+  })();
+  return qrStopPromise;
 }
 
 function setTorchButton(on) {
-  if (!qrFlashBtn) return;
-  qrFlashBtn.classList.toggle("on", on);
-  qrFlashBtn.textContent = on ? "💡 Flash : ON" : "💡 Flash";
-}
-
-function setTorchOff() {
-  if (!qrTorchOn) return;
-  qrTorchOn = false;
-  setTorchButton(false);
-  if (qrNativeStream) {
-    const track = qrNativeStream.getVideoTracks()[0];
-    if (track && track.getCapabilities && track.getCapabilities().torch) {
-      track.applyConstraints({ advanced: [{ torch: false }] }).catch(() => {});
-    }
-  } else if (html5QrCode && qrScannerRunning) {
-    html5QrCode.applyVideoConstraints({ advanced: [{ torch: false }] }).catch(() => {});
-  }
+  qrFlashBtn.classList.toggle('on', on);
+  qrFlashBtn.setAttribute('aria-pressed', String(on));
+  qrFlashBtn.textContent = on ? 'Éteindre la lampe' : 'Allumer la lampe';
 }
 
 async function toggleTorch() {
+  const track = getActiveCameraTrack();
+  if (!qrScannerRunning || !trackSupportsTorch(track)) return refreshFlashButton();
+  qrFlashBtn.disabled = true;
   try {
     const next = !qrTorchOn;
-    if (qrNativeStream) {
-      const track = qrNativeStream.getVideoTracks()[0];
-      if (!track || !track.getCapabilities || !track.getCapabilities().torch) {
-        showToast("Flashlight non supporté sur cet appareil");
-        return;
-      }
-      await track.applyConstraints({ advanced: [{ torch: next }] });
-    } else if (html5QrCode && qrScannerRunning) {
-      const caps = html5QrCode.getRunningTrackCapabilities ? html5QrCode.getRunningTrackCapabilities() : null;
-      if (!caps || !caps.torch) {
-        showToast("Flashlight non supporté sur cet appareil");
-        return;
-      }
-      await html5QrCode.applyVideoConstraints({ advanced: [{ torch: next }] });
-    } else {
-      showToast("Caméra non active");
-      return;
-    }
+    await track.applyConstraints(torchConstraints(track, next));
+    if (track !== getActiveCameraTrack() || !qrScannerRunning) return;
+    const actual = track.getSettings?.().torch;
+    if (typeof actual === 'boolean' && actual !== next) throw new Error('Torch unavailable');
     qrTorchOn = next;
     setTorchButton(next);
+    qrFlashBtn.disabled = false;
   } catch (err) {
-    console.warn("[torch] toggle failed:", err);
-    showToast("Flashlight non supporté sur cet appareil");
+    if (track !== getActiveCameraTrack() || !qrScannerRunning) return;
     qrTorchOn = false;
     setTorchButton(false);
+    qrFlashBtn.textContent = 'Lampe indisponible sur cet appareil';
+    // Scanning continues when a device rejects torch constraints.
   }
 }
 
 function refreshFlashButton() {
-  if (!qrFlashBtn) return;
-  let supported = false;
-  if (qrNativeStream) {
-    const track = qrNativeStream.getVideoTracks()[0];
-    supported = !!(track && track.getCapabilities && track.getCapabilities().torch);
-  } else if (html5QrCode) {
-    try {
-      const caps = html5QrCode.getRunningTrackCapabilities ? html5QrCode.getRunningTrackCapabilities() : null;
-      supported = !!(caps && caps.torch);
-    } catch {
-      supported = false;
-    }
-  }
-  qrFlashBtn.style.display = qrScannerRunning && supported ? "block" : "none";
-  if (!supported) {
-    qrTorchOn = false;
-    setTorchButton(false);
-  }
+  const supported = trackSupportsTorch(getActiveCameraTrack());
+  qrFlashBtn.style.display = qrScannerRunning ? 'block' : 'none';
+  qrFlashBtn.disabled = !supported;
+  setTorchButton(qrTorchOn);
+  if (!supported) qrFlashBtn.textContent = 'Lampe indisponible sur cet appareil';
 }
 
-function onQrScanned(decodedText) {
-  if (!decodedText || !decodedText.trim()) return;
-  console.log("[QR] scanned:", decodedText);
-  stopQrScanner();
-  const qrValue = decodedText.trim();
-  verifyQrCode(qrValue);
+async function onQrScanned(decodedText) {
+  if (!decodedText?.trim() || !qrModal.classList.contains('open')) return;
+  // Ignore duplicate callbacks and a pending verification after closing.
+  if (!qrScannerRunning) return;
+  await stopQrScanner();
+  if (qrModal.classList.contains('open')) await verifyQrCode(decodedText.trim());
 }
+
+window.addEventListener('pagehide', stopQrScanner);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && qrModal.classList.contains('open')) {
+    stopQrScanner();
+    qrRetryBtn.style.display = 'block';
+  }
+});
 
 async function handleCardPayment() {
   hidePaymentModal(true);
   showQrModal();
-  setTimeout(() => startQrScanner(), 300);
+  await startQrScanner();
 }
 
 async function handleCashPayment() {
@@ -1348,6 +1352,8 @@ function extractToken(input) {
 }
 
 async function verifyQrCode(qrId) {
+  const generation = qrScannerGeneration;
+  const current = () => generation === qrScannerGeneration && qrModal.classList.contains('open');
   qrId = extractToken(qrId);
   if (!qrId) {
     qrResult.className = "qr-result error";
@@ -1365,6 +1371,7 @@ async function verifyQrCode(qrId) {
   try {
     const tokenRes = await fetch(`/api/loyalty/token/${qrId}`);
     const tokenData = await tokenRes.json();
+    if (!current()) return;
 
     if (!tokenRes.ok || !tokenData.points && tokenData.points !== 0) {
       qrResult.className = "qr-result error";
@@ -1386,6 +1393,7 @@ async function verifyQrCode(qrId) {
     } catch (e) {
       console.warn("Could not load loyalty info:", e);
     }
+    if (!current()) return;
 
     // Best-case total the customer could reach with their best available discount
     // reward. A discount reward REPLACES any active promotion (never combined).
@@ -1414,14 +1422,8 @@ async function verifyQrCode(qrId) {
 
     if (loyaltyCustomerInfo) {
       renderLoyaltyInfo(loyaltyCustomerInfo);
-      renderRewardSelection(loyaltyConfig?.rewards || [], loyaltyCustomerInfo?.rewards || []);
+      renderRewardSelection(loyaltyCustomerInfo?.rewards || []);
     }
-
-    // Start the visit. This is the PRIMARY way a visit begins (recomponce.md §4):
-    // the customer scans, the card is bound to this table's session, and the
-    // visit is counted when the waiter frees the table. Fire-and-forget on
-    // purpose — a visit-tracking hiccup must never block a valid payment.
-    startVisit(qrId);
 
     if (confirmPaymentBtn) {
       confirmPaymentBtn.textContent = `Confirmer le paiement — ${getEffectivePaymentTotal().toFixed(3)} DT`;
@@ -1436,51 +1438,11 @@ async function verifyQrCode(qrId) {
   }
 }
 
-/**
- * Open (or re-confirm) this card's visit for the current table.
- *
- * Idempotent by design: scanning the same card again at the same table returns
- * the same visit with created:false and does NOT increment anything, so one
- * sitting counts once no matter how many times the customer re-scans. A failed
- * visit call is logged, never surfaced — losing a visit must not cost the
- * customer their payment.
- */
-async function startVisit(token) {
-  try {
-    const res = await fetch("/api/loyalty/visit/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, numtable })
-    });
-    if (!res.ok) {
-      console.warn("Visit not started:", (await res.json().catch(() => ({}))).error);
-      return;
-    }
-    const data = await res.json();
-    if (data.visitCount !== undefined) renderVisitCounter(data.visitCount);
-  } catch (e) {
-    console.warn("Could not start visit:", e);
-  }
-}
-
-let visitCounterEl = null;
-
-function renderVisitCounter(visitCount) {
-  if (!visitCounterEl) visitCounterEl = document.getElementById("visitCounter");
-  if (!visitCounterEl) return;
-  // The element wraps the number in a <span>; only that node is replaced so the
-  // "☕ Visites :" label is not clobbered.
-  const numEl = visitCounterEl.querySelector("span") || visitCounterEl;
-  numEl.textContent = visitCount;
-  visitCounterEl.style.display = "inline-block";
-}
-
 async function processCardPaymentWithReward() {
   if (!pendingQrId) return;
 
   const orderItems = getOrderItems();
   const orderBaseTotal = getOrderBaseTotal();
-  const displayTotal = computeFinalTotal(orderBaseTotal);
 
   if (confirmPaymentBtn) confirmPaymentBtn.disabled = true;
   qrResult.textContent = "Traitement du paiement en cours...";
@@ -1516,31 +1478,18 @@ async function processCardPaymentWithReward() {
       return;
     }
 
-    let earnedPoints = 0;
-    if (loyaltyCustomerInfo && loyaltyCustomerInfo.card) {
-      const oldPoints = Number(loyaltyCustomerInfo.card.points || 0);
-      const newPoints = Math.max(0, oldPoints - displayTotal);
-      earnedPoints = displayTotal;
-    }
-
-    // The visit itself is opened server-side by this payment (recomponce.md §4/§12).
-    // The scan-time startVisit() call can legitimately fail when the table has no
-    // open receipt yet, so trust the authoritative count the payment returns.
-    if (payData.visitCount !== undefined) {
-      renderVisitCounter(payData.visitCount);
-    }
-
+    const chargedTotal = Number(payData.total);
     qrResult.className = "qr-result success";
     qrResult.innerHTML = `Paiement réussi ! Merci de votre visite.`;
     qrResult.style.display = "block";
 
     if (loyaltyCustomerInfo && loyaltyCustomerInfo.card) {
-      const newBalance = Math.max(0, Number(loyaltyCustomerInfo.card.points || 0) - displayTotal);
+      const newBalance = Number(payData.remainingPoints);
       const loyaltySummary = document.createElement('div');
       loyaltySummary.className = 'loyalty-summary';
       loyaltySummary.innerHTML = `
         <div class="loyalty-summary__row">
-          <span>Débit:</span><span>-${formatPoints(displayTotal)} DT</span>
+          <span>Débit:</span><span>-${formatPoints(chargedTotal)} DT</span>
         </div>
         <div class="loyalty-summary__row">
           <span>Nouveau solde:</span><span>${formatPoints(newBalance)} DT</span>
@@ -1689,7 +1638,7 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
         if (demanderBtn) demanderBtn.addEventListener("click", sendOrder);
 
         // Payment modal events
-        if (paymentClose) paymentClose.addEventListener("click", hidePaymentModal);
+        if (paymentClose) paymentClose.addEventListener("click", () => hidePaymentModal(false));
         if (paymentOverlay) paymentOverlay.addEventListener("click", hidePaymentModal);
         if (payCardBtn) payCardBtn.addEventListener("click", handleCardPayment);
         if (payCashBtn) payCashBtn.addEventListener("click", handleCashPayment);
@@ -1709,16 +1658,18 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
 
         // Cash modal events
         const handleCashConfirm = async () => {
-          const cashTotal = activePromotion && activePromotion.active
-            ? getDiscountedTotal(lastOrderTotal, activePromotion.discountPercent)
-            : lastOrderTotal;
           try {
-            await fetch("/process-cash-payment", {
+            const response = await fetch("/process-cash-payment", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ idrecu: lastOrderIdrecu, total: cashTotal })
+              body: JSON.stringify({ idrecu: lastOrderIdrecu, total: lastOrderTotal })
             });
-          } catch {}
+            const result = await response.json();
+            if (!response.ok || !result.success) throw new Error('Cash confirmation failed');
+          } catch (err) {
+            showToast("Erreur de confirmation. Veuillez réessayer.");
+            return;
+          }
           hideCashModal();
           cart = [];
           pendingOrderItems = null;
