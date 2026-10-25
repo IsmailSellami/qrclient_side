@@ -368,13 +368,14 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
     );
 
     if (existing.rowCount === 0) {
+      const active = await getActiveVisitReward(db);
       // First loyalty payment: create the counter with this visit already counted,
       // then exit immediately.
       await db.query(
-        `INSERT INTO customer_visits (qr_code_id, status, order_count, reward, started_at)
-         VALUES ($1, 'open', 1, false, NOW())
+        `INSERT INTO customer_visits (qr_code_id, status, order_count, reward, started_at,reward_id)
+         VALUES ($1, 'open', 1, false, NOW(), $2)
          ON CONFLICT DO NOTHING`,
-        [cardId]
+        [cardId,String(active.id) ]
       );
       return 1;
     }
