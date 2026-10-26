@@ -14,8 +14,7 @@ export function getConnectionString(connectionString) {
 }
 
 export const pool = new pg.Pool({
-  connectionString: getConnectionString(process.env.DATABASE_URL),
-  ssl: { rejectUnauthorized: false },
+  ...getPoolOptions(process.env.DATABASE_URL),
   max: 1,
   idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 10000,
@@ -23,10 +22,29 @@ export const pool = new pg.Pool({
 });
 
 // pg removes the failed idle client; a later query can open a new connection.
-pool.on('error', err => console.error('Idle database connection failed:', err.message));
+pool.on('error', () => console.error('Idle database connection failed'));
+
+export function getPoolOptions(connectionString) {
+  let clean = getConnectionString(connectionString);
+  if (clean) {
+    const url = new URL(clean);
+    // pg connection-string SSL options override its ssl object. Require both
+    // certificate-chain and hostname verification, regardless of URL options.
+    for (const key of ['ssl','sslmode','sslcert','sslkey','sslrootcert','uselibpqcompat']) url.searchParams.delete(key);
+    clean = url.toString();
+  }
+  return { connectionString: clean, ssl: { rejectUnauthorized: true,
+    ...(process.env.SUPABASE_DB_CA ? { ca: process.env.SUPABASE_DB_CA.replace(/\\n/g, '\n') } : {}) } };
+}
 
 export const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+  : null;
+
+// Each OTP call gets an isolated client: verifyOtp mutates client session state.
+export const authFactory = process.env.SUPABASE_URL && (process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_KEY)
+  ? () => createClient(process.env.SUPABASE_URL, process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_KEY,
+    { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }).auth
   : null;
 
 // Preserve the local server's additive schema setup. Never drop existing data.

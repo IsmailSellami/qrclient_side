@@ -1,15 +1,15 @@
 import express from 'express';
-import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
 import crypto from 'crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPrices, baseTotal, linePrice, promotionPercent } from './pricing.js';
+import { installCustomerAuth } from './auth.js';
+import { sameOrigin, distributedLimit, beginRequest, validToken, validId, validRequestKey, validateCart, hash, safeLog, phoneNumber } from './security.js';
 
 const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
 
-export function createApp({ pool, supabase = null, local = false, port = 3991 }) {
+export function createApp({ pool, supabase = null, authFactory = null, local = false, port = 3991 }) {
   const app = express();
 
   /* ───── Environment ───── */
@@ -18,43 +18,12 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
 
   /* ───── Security helpers ───── */
 
-  function isSameOrigin(req) {
-    const origin = req.headers['origin'];
-    const referer = req.headers['referer'];
-    const host = req.headers['host'];
-    if (!host) return false;
-    if (origin && (origin === `http://${host}` || origin === `https://${host}`)) return true;
-    if (referer) {
-      try {
-        const u = new URL(referer);
-        if (u.host === host) return true;
-      } catch { }
-    }
-    return !origin && !referer;
-  }
-
-  function csrfProtection(req, res, next) {
-    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
-    if (!isSameOrigin(req)) {
-      return res.status(403).json({ success: false, error: 'FORBIDDEN' });
-    }
-    next();
-  }
-
-  /* ───── Middlewares ───── */
-
-  app.use(cors({
-    origin: local ? (origin, cb) => cb(null, !origin || [
-      `http://localhost:${port}`, `http://127.0.0.1:${port}`,
-    ].includes(origin) || /^http:\/\/(192\.168\.|10\.)/.test(origin)) : true,
-    credentials: local,
-  }));
-
+  app.disable('x-powered-by');
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
+        scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:", "https://ewciynnuevuzbcrwcjut.supabase.co", "https://i.postimg.cc"],
         connectSrc: ["'self'"],
@@ -65,40 +34,44 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         upgradeInsecureRequests: local ? null : [],
       },
     },
+    referrerPolicy: { policy: 'no-referrer' },
     crossOriginEmbedderPolicy: false,
     crossOriginResourcePolicy: { policy: 'same-origin' },
   }));
 
-  const globalLimiter = rateLimit({
-    windowMs: 60_000,
-    max: 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, error: 'Trop de requêtes' },
-  });
-  app.use(globalLimiter);
-
-  const paymentLimiter = rateLimit({
-    windowMs: 60_000,
-    max: 20,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, error: 'Trop de requêtes' },
+  app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    res.set('Permissions-Policy', 'camera=(self), geolocation=(self), microphone=()');
+    if (!sameOrigin(req, local)) return res.status(403).json({ success: false, error: 'FORBIDDEN' });
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.is('application/json')) {
+      return res.status(415).json({ success: false, error: 'JSON_REQUIRED' });
+    }
+    next();
   });
 
-  app.use(express.json({ limit: '100kb' }));
-  app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+  app.use(express.json({ limit: '32kb', strict: true, inflate: false }));
+  app.use((req, res, next) => {
+    if (req.body == null) req.body = {};
+    if (Array.isArray(req.body) || typeof req.body !== 'object') return res.status(400).json({ error: 'INVALID_BODY' });
+    next();
+  });
   app.use('/css', express.static(path.join(publicDir, 'css')));
   app.use('/js', express.static(path.join(publicDir, 'js')));
   app.get('/', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+  app.use(distributedLimit(pool, 'api', 120, 60));
+  const paymentLimiter = distributedLimit(pool, 'payment', 20, 60);
+  const otpLimiter = distributedLimit(pool, 'otp-ip', 15, 3600);
+  const tokenLimiter = distributedLimit(pool, 'otp-card', 10, 3600, req => String(req.body.token || 'invalid'));
+  const requireCustomer = installCustomerAuth(app, { pool, authFactory, local, otpLimiter, tokenLimiter });
 
-  /* ───── Public Loyalty Endpoints (before CSRF) ───── */
+  /* ───── Customer loyalty endpoints (session and ownership required) ───── */
 
-  // loyalty token lookup (public)
-  app.get('/api/loyalty/token/:token', async (req, res) => {
+  // Legacy route name retained; a QR token alone is not authorization.
+  app.get('/api/loyalty/token/:token', requireCustomer, async (req, res) => {
     try {
       const raw = req.params.token;
-      if (!raw || raw.length < 24) {
+      if (!raw || !validToken(raw)) {
         return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       }
 
@@ -125,7 +98,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         lifetimePoints: Number(card.lifetime_points || 0),
       });
     } catch (err) {
-      console.error('GET /api/loyalty/token/:token error:', err);
+      safeLog('GET /api/loyalty/token/:token error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
@@ -148,16 +121,16 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         challenges: challengesResult.rows,
       });
     } catch (err) {
-      console.error('GET /api/loyalty/public/config error:', err);
+      safeLog('GET /api/loyalty/public/config error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
 
-  // loyalty customer full info (public — card + tier + rewards + challenges for QR viewer)
-  app.get('/api/loyalty/public/customer/:token', async (req, res) => {
+  // Customer card, rewards and challenges for the authenticated QR viewer.
+  app.get('/api/loyalty/public/customer/:token', requireCustomer, async (req, res) => {
     try {
       const { token } = req.params;
-      if (!token || token.length < 24) {
+      if (!token || !validToken(token)) {
         return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       }
 
@@ -241,7 +214,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         activeChallenges: challengesResult.rows,
       });
     } catch (err) {
-      console.error('GET /api/loyalty/public/customer/:token error:', err);
+      safeLog('GET /api/loyalty/public/customer/:token error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
@@ -441,14 +414,14 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
     return orderCount;
   }
 
-  // loyalty transactions (public — by token)
+  // Customer transactions (authenticated and bound to the card's phone).
   // The permanent loyalty_transactions ledger was removed from the schema, so no
   // transaction history can exist. The endpoint stays for compatibility and
   // returns an empty list once a valid active card is found.
-  app.get('/api/loyalty/public/transactions/:token', async (req, res) => {
+  app.get('/api/loyalty/public/transactions/:token', requireCustomer, async (req, res) => {
     try {
       const { token } = req.params;
-      if (!token || token.length < 24) {
+      if (!token || !validToken(token)) {
         return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       }
 
@@ -459,20 +432,20 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
 
       res.json([]);
     } catch (err) {
-      console.error('GET /api/loyalty/public/transactions/:token error:', err);
+      safeLog('GET /api/loyalty/public/transactions/:token error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
 
-  // loyalty redeem reward (public — by token + rewardId)
-  app.post('/api/loyalty/public/redeem-reward', paymentLimiter, async (req, res) => {
+  // Legacy redemption endpoint; same session/ownership rules as checkout.
+  app.post('/api/loyalty/public/redeem-reward', paymentLimiter, requireCustomer, async (req, res) => {
     const { token, rewardId } = req.body;
 
-    if (!token || typeof token !== 'string' || token.length < 24) {
+    if (!token || typeof token !== 'string' || !validToken(token)) {
       return res.status(400).json({ success: false, error: 'TOKEN_REQUIRED' });
     }
     const rewardIdNum = Number(rewardId);
-    if (isNaN(rewardIdNum) || rewardIdNum <= 0) {
+    if (!validId(rewardIdNum)) {
       return res.status(400).json({ success: false, error: 'REWARD_REQUIRED' });
     }
 
@@ -481,7 +454,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
       await client.query('BEGIN');
 
       const cardResult = await client.query(
-        'SELECT id, status FROM qr_code WHERE token = $1 FOR UPDATE',
+        'SELECT id, status, phone FROM qr_code WHERE token = $1 FOR UPDATE',
         [token]
       );
       if (cardResult.rowCount === 0) {
@@ -489,14 +462,18 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         return res.status(404).json({ success: false, error: 'NOT_FOUND' });
       }
       const card = cardResult.rows[0];
+      if (phoneNumber(card.phone) !== req.customerPhone) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'FORBIDDEN' });
+      }
       if (card.status !== 'active') {
         await client.query('ROLLBACK');
         return res.status(400).json({ success: false, error: 'INACTIVE_CARD' });
       }
 
       // R5 / R7: entitlement is proven by the CLAIM, not by the catalog row.
-      // `customer_rewards.id + qr_code_id + is_redeemed = false` is the whole
-      // authorization. The two window predicates that used to sit here meant a
+      // The authenticated phone/card binding and the unredeemed claim jointly
+      // authorize this request. The two window predicates that used to sit here meant a
       // customer who earned a reward at 17:50 lost it at 18:01 and could never
       // spend it — the exact theft the binding lifecycle rule forbids. They are
       // removed: ends_at is an unlock condition, never an expiry of ownership.
@@ -521,14 +498,14 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
       res.json({ success: true, message: 'Récompense utilisée' });
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('POST /api/loyalty/public/redeem-reward error:', err);
+      safeLog('POST /api/loyalty/public/redeem-reward error:', err);
       res.status(500).json({ success: false, error: 'DB_ERROR' });
     } finally {
       client.release();
     }
   });
 
-  app.use(csrfProtection);
+
 
   /* ───── Routes ───── */
 
@@ -557,7 +534,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
       const result = await pool.query('SELECT * FROM categorie');
       res.json(result.rows);
     } catch (err) {
-      console.error(err);
+      safeLog('Database operation failed', err);
       res.status(500).json({ error: 'DB_ERROR' });
     }
   });
@@ -568,23 +545,23 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
       const result = await pool.query('SELECT * FROM product WHERE archived = FALSE');
       res.json(result.rows);
     } catch (err) {
-      console.error(err);
+      safeLog('Database operation failed', err);
       res.status(500).json({ error: 'DB_ERROR' });
     }
   });
 
   // create order
-  app.post('/demander', async (req, res) => {
+  app.post('/demander', paymentLimiter, async (req, res) => {
     const numtable = Number(req.body.numtable);
 
-    if (!numtable) {
+    if (!validId(numtable) || numtable > 10000) {
       return res.status(400).json({ success: false, error: 'INVALID_TABLE' });
     }
 
     const items = Array.isArray(req.body.items) ? req.body.items : [];
     const totale = Number(req.body.totale);
 
-    if (!items.length) {
+    if (!validateCart(items)) {
       return res.status(400).json({ success: false, error: 'EMPTY_CART' });
     }
 
@@ -601,6 +578,12 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const request = await beginRequest(client, req, 'cash', 'guest');
+      if (request.response) {
+        await client.query('ROLLBACK');
+        return res.json(request.response);
+      }
+      await client.query('SELECT pg_advisory_xact_lock(198401, $1::integer)', [numtable]);
       const priceMap = await loadPrices(client, items);
       const fullTotal = baseTotal(items, priceMap);
 
@@ -631,14 +614,16 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         );
       }
 
+      const response = { success: true, idrecu, total: fullTotal };
+      await request.save(response);
       await client.query('COMMIT');
 
       // Cash/order route carries no loyalty token, so it never counts a visit:
       // visits are counted on a loyalty-card payment in /process-card-payment.
-      res.json({ success: true, idrecu, total: fullTotal });
+      res.json(response);
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error(err);
+      safeLog('Database operation failed', err);
       res.status(err.status || 500).json({ success: false, error: err.status ? err.message : 'DB_ERROR' });
     } finally {
       client.release();
@@ -666,7 +651,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
       const promo = result.rows[0];
       res.json({ active: true, discountPercent: promo.discount_percent, minimumPurchaseAmount: Number(promo.minimum_purchase_amount || 0) });
     } catch (err) {
-      console.error('GET /api/promotions/active error:', err);
+      safeLog('GET /api/promotions/active error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
@@ -697,19 +682,19 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
 
       res.json({ status: 'none' });
     } catch (err) {
-      console.error('GET /api/promotions/banner error:', err);
+      safeLog('GET /api/promotions/banner error:', err);
       res.status(500).json({ success: false, error: 'Erreur serveur' });
     }
   });
 
   // Verify QR code for card payment
-  app.post('/verify-qr', paymentLimiter, async (req, res) => {
+  app.post('/verify-qr', paymentLimiter, requireCustomer, async (req, res) => {
     let { qrId, total } = req.body;
 
     const urlMatch = qrId && typeof qrId === 'string' ? qrId.match(/\/loyalty\/([a-f0-9]{24})/i) : null;
     if (urlMatch) qrId = urlMatch[1];
 
-    if (!qrId || typeof qrId !== 'string' || qrId.length < 24) {
+    if (!qrId || typeof qrId !== 'string' || !validToken(qrId)) {
       return res.status(400).json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
     }
 
@@ -720,7 +705,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
 
     let discountPercent = 0;
     try { discountPercent = await promotionPercent(pool, totalNum); }
-    catch (err) { console.error('Promotion lookup error:', err); }
+    catch (err) { safeLog('Promotion lookup error:', err); }
     const discountedTotal = Math.round(totalNum * (100 - discountPercent)) / 100;
 
     try {
@@ -744,7 +729,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         discount: discountPercent > 0 ? { percent: discountPercent, originalTotal: totalNum, discountedTotal } : undefined,
       });
     } catch (err) {
-      console.error(err);
+      safeLog('Database operation failed', err);
       res.status(500).json({ success: false, error: 'DB_ERROR' });
     }
   });
@@ -767,28 +752,28 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
           ],
         );
       } catch (err) {
-        console.error('notifyPointsDeduction failed:', (err && err.message) || err);
+        safeLog('notifyPointsDeduction failed:', err);
       }
     })();
   }
 
   // Process card payment — verify card, then atomically insert order + deduct points
-  app.post('/process-card-payment', paymentLimiter, async (req, res) => {
+  app.post('/process-card-payment', paymentLimiter, requireCustomer, async (req, res) => {
     let { qrId, numtable, items, total, rewardId } = req.body;
 
     const urlMatch = qrId && typeof qrId === 'string' ? qrId.match(/\/loyalty\/([a-f0-9]{24})/i) : null;
     if (urlMatch) qrId = urlMatch[1];
-    if (!qrId || typeof qrId !== 'string' || qrId.length < 24) {
+    if (!qrId || typeof qrId !== 'string' || !validToken(qrId)) {
       return res.status(400).json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
     }
 
     numtable = Number(numtable);
-    if (!numtable) {
+    if (!validId(numtable) || numtable > 10000) {
       return res.status(400).json({ success: false, error: 'INVALID_TABLE' });
     }
 
     items = Array.isArray(items) ? items : [];
-    if (!items.length && !rewardId) {
+    if (!validateCart(items) || (rewardId != null && !validId(rewardId))) {
       return res.status(400).json({ success: false, error: 'EMPTY_CART' });
     }
 
@@ -807,17 +792,27 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const request = await beginRequest(client, req, 'card', req.customerUser);
+      if (request.response) {
+        await client.query('ROLLBACK');
+        return res.json(request.response);
+      }
+      await client.query('SELECT pg_advisory_xact_lock(198401, $1::integer)', [numtable]);
       const priceMap = await loadPrices(client, items);
       let effectiveDiscount = 0;
       let discountedTotal = 0;
 
-      const byToken = await client.query('SELECT id, token, points, status, name FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
+      const byToken = await client.query('SELECT id, token, points, status, name, phone FROM qr_code WHERE token = $1 FOR UPDATE', [qrId]);
       if (byToken.rowCount === 0) {
         await client.query('ROLLBACK');
         return res.json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
       }
 
       const customerRow = byToken.rows[0];
+      if (phoneNumber(customerRow.phone) !== req.customerPhone) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'FORBIDDEN' });
+      }
       if (customerRow.status !== 'active') {
         await client.query('ROLLBACK');
         return res.json({ success: false, error: 'CUSTOMER_NOT_FOUND' });
@@ -839,12 +834,16 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
           return res.json({ success: false, error: 'REWARD_UNAVAILABLE' });
         }
         const reward = rewardResult.rows[0];
-        if (reward.reward_type === 'discount' && Number(reward.discount_percent) > 0) {
+        if (reward.reward_type === 'discount' && Number(reward.discount_percent) > 0 && Number(reward.discount_percent) <= 100) {
           // An earned discount replaces the promotion; discounts never stack.
           effectiveDiscount = Number(reward.discount_percent);
         } else if (reward.reward_type === 'free_item' && reward.product_id) {
           const freeId = String(reward.product_id);
-          if (items.some(item => String(item.idname) === freeId)) freeItemIds.add(freeId);
+          const index = items.findIndex(item => String(item.idname) === freeId);
+          if (index < 0) throw Object.assign(new Error('REWARD_ITEM_REQUIRED'), { status: 400 });
+          freeItemIds.add(index);
+        } else {
+          throw Object.assign(new Error('INVALID_REWARD'), { status: 400 });
         }
         await client.query(
           'UPDATE customer_rewards SET is_redeemed = true, redeemed_at = NOW() WHERE id = $1',
@@ -868,7 +867,7 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         await client.query('RELEASE SAVEPOINT payment_visit');
       } catch (err) {
         await client.query('ROLLBACK TO SAVEPOINT payment_visit');
-        console.warn('Visit counting failed (non-fatal):', err.message);
+        safeLog('Visit counting failed', err);
       }
 
       let idrecu;
@@ -891,8 +890,8 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         );
       }
 
-      for (const item of items) {
-        const itemPrix = linePrice(item, priceMap, effectiveDiscount, freeItemIds);
+      for (const [index, item] of items.entries()) {
+        const itemPrix = linePrice(item, priceMap, effectiveDiscount, freeItemIds, index);
         await client.query(
           "INSERT INTO orderr (idrecu, id, idname, optionn, status, type, prix, paid, nom_ut) VALUES ($1,$2,$3,$4,$5,$6,$7,'oui',$8)",
           [idrecu, numtable, String(item.idname), item.optionn ?? null, 'online', 'Pending', itemPrix, customerRow.name || null]
@@ -908,49 +907,38 @@ export function createApp({ pool, supabase = null, local = false, port = 3991 })
         WHERE idrecu = $2
       `, [effectiveDiscount > 0 ? effectiveDiscount : null, idrecu]);
 
-      await client.query('COMMIT');
-
       const remainingPoints = Math.round((currentPoints - discountedTotal) * 100) / 100;
+      const response = { success: true, idrecu, rewardApplied, total: discountedTotal, remainingPoints };
+      await request.save(response);
+      await client.query('COMMIT');
       notifyPointsDeduction(customerRow.id, customerRow.name, discountedTotal, remainingPoints);
 
-      res.json({ success: true, idrecu, rewardApplied: rewardApplied || false, total: discountedTotal, remainingPoints });
+      res.json(response);
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error(err);
+      safeLog('Database operation failed', err);
       res.status(err.status || 500).json({ success: false, error: err.status ? err.message : 'DB_ERROR' });
     } finally {
       client.release();
     }
   });
 
-  // Cash payment
-  app.post('/process-cash-payment', async (req, res) => {
-    const { idrecu, total } = req.body;
+  // A guest can acknowledge only the order they created. Cash is collected by
+  // staff; a browser request must never settle or rewrite a shared receipt.
+  app.post('/process-cash-payment', paymentLimiter, async (req, res) => {
+    const key = req.get('Idempotency-Key');
+    if (!validRequestKey(key) || !validId(req.body.idrecu)) return res.status(400).json({ error: 'MISSING_PARAMS' });
+    const result = await pool.query("SELECT response FROM app_private.checkout_requests WHERE scope='cash' AND key=$1", [hash(key)]);
+    const order = result.rows[0]?.response;
+    if (!order || Number(order.idrecu) !== Number(req.body.idrecu)) return res.status(404).json({ error: 'RECEIPT_NOT_FOUND' });
+    res.json({ success: true, total: order.total });
+  });
 
-    const idrecuNum = Number(idrecu);
-    if (!idrecu || isNaN(idrecuNum) || idrecuNum <= 0) {
-      return res.status(400).json({ success: false, error: 'MISSING_PARAMS' });
-    }
-
-    const totalNum = Number(total);
-    if (isNaN(totalNum) || totalNum <= 0 || !Number.isFinite(totalNum)) {
-      return res.status(400).json({ success: false, error: 'INVALID_TOTAL' });
-    }
-
-    try {
-      // Read persisted line prices: a forged discounted browser total cannot lower cash.
-      const result = await pool.query(
-        `UPDATE recu SET payment_method = 'cash', discount_percent = NULL,
-          totale = (SELECT COALESCE(SUM(prix), 0) FROM orderr WHERE idrecu = $1)
-         WHERE idrecu = $1 AND EXISTS (SELECT 1 FROM orderr WHERE idrecu = $1)
-         RETURNING totale`, [idrecuNum]
-      );
-      if (!result.rowCount) return res.status(404).json({ success: false, error: 'RECEIPT_NOT_FOUND' });
-      res.json({ success: true, total: Number(result.rows[0].totale) });
-    } catch (err) {
-      console.error('Cash payment update error:', err);
-      res.status(500).json({ success: false, error: 'DB_ERROR' });
-    }
+  app.use((_req, res) => res.status(404).json({ error: 'NOT_FOUND' }));
+  app.use((err, _req, res, _next) => {
+    safeLog('Request failed', err);
+    const status = [400,413,415].includes(err.status) ? err.status : 500;
+    res.status(status).json({ success: false, error: status === 500 ? 'SERVER_ERROR' : 'INVALID_REQUEST' });
   });
 
   return app;

@@ -2,16 +2,17 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdir, readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import express from 'express';
-import { fileURLToPath } from 'node:url';
+import https from 'node:https';
+import { createApp } from '../server/app.js';
 
 // Install Playwright separately or set PLAYWRIGHT_MODULE to its module URL.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const app = express();
-app.use(express.static(fileURLToPath(new URL('../public/', import.meta.url))));
-const server = app.listen(0, '127.0.0.1');
+const app = createApp({ pool: { async query() { throw new Error('Unexpected database access in browser fixture'); } }, local: true });
+const server = process.env.BROWSER_TEST_CERT && process.env.BROWSER_TEST_KEY
+  ? https.createServer({ cert: await readFile(process.env.BROWSER_TEST_CERT), key: await readFile(process.env.BROWSER_TEST_KEY) },app).listen(0,'127.0.0.1')
+  : app.listen(0, '127.0.0.1');
 await once(server, 'listening');
-const base = 'http://127.0.0.1:' + server.address().port;
+const base = (process.env.BROWSER_TEST_CERT ? 'https' : 'http') + '://127.0.0.1:' + server.address().port;
 await mkdir('artifacts', { recursive: true });
 let decoderSource, qrFixture;
 if (process.env.HTML5_QRCODE_PATH && process.env.QR_GENERATOR_PATH) {
@@ -26,10 +27,12 @@ if (process.env.HTML5_QRCODE_PATH && process.env.QR_GENERATOR_PATH) {
 
 async function run(browser, name) {
   let cashBody;
-  async function pageFor({ width = 390, height = 664, count = 1, mode = 'native', torch = true, minimum = 0, percent = 20 } = {}) {
-    const page = await browser.newPage({ viewport: { width, height }, isMobile: true, hasTouch: true });
+  async function pageFor({ width = 390, height = 664, count = 1, mode = 'native', torch = true, minimum = 0, percent = 20, requireOtp = false, malicious = false } = {}) {
+    const page = await browser.newPage({ viewport: { width, height }, isMobile: true, hasTouch: true, ignoreHTTPSErrors: !!process.env.BROWSER_TEST_CERT });
     page.setDefaultTimeout(10000);
     const errors = [];
+    let verified = !requireOtp;
+    const payload = '<img src=x onerror=window.__xss=1>';
     page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
@@ -41,11 +44,20 @@ async function run(browser, name) {
       if (url.pathname === '/api/promotions/active') return json({ active: !!percent, discountPercent: percent, minimumPurchaseAmount: minimum });
       if (url.pathname === '/api/promotions/banner') return json({ status: 'none' });
       if (url.pathname === '/api/loyalty/public/config') return json({ rewards: [], challenges: [], packages: [] });
-      if (url.pathname.startsWith('/api/loyalty/token/')) return json({ points: 100, name: 'Test' });
-      if (url.pathname.startsWith('/api/loyalty/public/customer/')) return json({ card: { points: 100 }, rewards: [], activeChallenges: [] });
+      if (url.pathname === '/api/auth/start') return json({success:true});
+      if (url.pathname === '/api/auth/logout') { verified=false;return json({success:true}); }
+      if (url.pathname === '/api/auth/verify') {
+        assert.equal(route.request().postDataJSON().code,'123456');
+        verified=true;return json({success:true});
+      }
+      if (url.pathname.startsWith('/api/loyalty/token/')) return verified ? json({ points: 100, name: 'Test' }) : route.fulfill({status:401,json:{error:'AUTH_REQUIRED'}});
+      if (url.pathname.startsWith('/api/loyalty/public/customer/')) return json({ card: { points: 100, name: malicious ? payload : 'Test' }, rewards: malicious ? [{ id:3, rewardName:payload,mysteryResult:payload,rewardType:'free_item',productId:payload,isRedeemed:false }] : [], activeChallenges: [] });
       if (url.pathname === '/api/loyalty/visit/start') throw new Error('Removed visit display still makes requests');
       if (url.pathname === '/verify-location') return json({ authorized: true });
-      if (url.pathname === '/demander') return json({ success: true, idrecu: 1, total: 10 });
+      if (url.pathname === '/demander') {
+        assert.match(route.request().headers()['idempotency-key'],/^[a-f0-9-]{36}$/);
+        return json({ success: true, idrecu: 1, total: 10 });
+      }
       if (url.pathname === '/process-cash-payment') { cashBody = route.request().postDataJSON(); return json({ success: true, total: 10 }); }
       return route.continue();
     });
@@ -87,6 +99,9 @@ async function run(browser, name) {
         window.__tracks.push(track);
         return stream;
       };
+      // Windows WebKit omits mediaDevices even though tests provide synthetic
+      // streams. This is a fixture, not a production browser capability claim.
+      if (!navigator.mediaDevices) Object.defineProperty(navigator, 'mediaDevices', { value: {} });
       Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: async () => {
         if (mode === 'denied') throw new Error('Permission denied');
         if (mode === 'delayed') await new Promise(resolve => { window.__allowCamera = resolve; });
@@ -126,6 +141,7 @@ async function run(browser, name) {
     await page.locator('#paymentModal.open').waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.getElementById('payCard').disabled);
   }
+  if (!process.env.BROWSER_SECURITY_ONLY) {
   for (const [width, height] of [[320, 480], [360, 640], [390, 664], [844, 390], [390, 280], [1440, 900]]) {
     console.log(name, 'cart', width, height);
     const { page, errors } = await pageFor({ width, height, count: 30 });
@@ -158,8 +174,18 @@ async function run(browser, name) {
     await page.locator('#cashOk').click();
     await page.waitForFunction(() => document.getElementById('cartCount').textContent === '0');
     assert.equal(cashBody.total, 10);
+    assert.equal(await page.evaluate(()=>sessionStorage.getItem('sellamo_checkout')),null);
     assert.deepEqual(errors, []);
     await page.close();
+  }
+  if (name === 'webkit') {
+    const probe = await browser.newPage();
+    const mediaFixtureAvailable = await probe.evaluate(() => typeof MediaStream !== 'undefined' && typeof document.createElement('canvas').captureStream === 'function');
+    await probe.close();
+    if (!mediaFixtureAvailable) {
+      console.log('webkit: cart/layout and cash checkout passed; scanner/auth UI tests SKIPPED because this build lacks MediaStream/canvas.captureStream. Real Safari camera remains unverified.');
+      return;
+    }
   }
   for (const mode of ['native', 'fallback']) {
     for (const torch of [true, false]) {
@@ -235,6 +261,44 @@ async function run(browser, name) {
     assert.deepEqual(errors, []);
     await page.close();
   }
+  }
+  {
+    console.log(name, 'SMS verification UI and escaped customer/reward data');
+    const {page,errors}=await pageFor({requireOtp:true,malicious:true});
+    await checkout(page);
+    await page.locator('#payCard').click();
+    await page.locator('#qrFlashBtn').waitFor({state:'visible'});
+    await page.evaluate(()=> {window.__scan=true;window.__drawFrame();});
+    try { await page.getByRole('button',{name:'Recevoir un code SMS'}).click(); }
+    catch (error) {
+      console.log(await page.locator('#qrResult').evaluate(el=>({html:el.innerHTML,display:getComputedStyle(el).display,detect:window.__detectCalls,scan:window.__scan})),errors);
+      await page.screenshot({path:'artifacts/otp-debug.png'});throw error;
+    }
+    await page.getByRole('textbox',{name:'Code SMS'}).fill('123456');
+    await page.getByRole('button',{name:'Vérifier le code'}).click();
+    await page.locator('#confirmPaymentBtn').waitFor({state:'visible'});
+    assert.equal(await page.locator('#loyaltyInfo img, #rewardSelection img').count(),0);
+    assert.equal(await page.evaluate(()=>window.__xss),undefined);
+    assert((await page.locator('#loyaltyInfo').innerText()).includes('<img'));
+    await page.locator('.reward-card').click();
+    assert.equal(await page.locator('#rewardFreeOptions img').count(),0);
+    await page.getByRole('button',{name:'Déconnecter la carte'}).click();
+    await page.getByRole('button',{name:'Recevoir un code SMS'}).waitFor({state:'visible'});
+    assert.deepEqual(errors,[]);
+    await page.close();
+  }
+  {
+    const {page}=await pageFor();
+    await checkout(page);
+    const firstKey=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('sellamo_checkout')).key);
+    await page.locator('#paymentClose').click();
+    await checkout(page);
+    assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('sellamo_checkout')).key),firstKey);
+    await page.reload();
+    await checkout(page);
+    assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('sellamo_checkout')).key),firstKey);
+    await page.close();
+  }
   if (decoderSource) {
     console.log(name, 'real html5-qrcode decode');
     const { page, errors } = await pageFor({ mode: 'real-fallback', torch: false });
@@ -252,8 +316,8 @@ async function run(browser, name) {
 try {
   const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}) });
   try { await run(browser, 'chromium'); } finally { await browser.close(); }
-  if (process.env.WEBKIT_EXECUTABLE) {
-    const safari = await webkit.launch({ headless: true, executablePath: process.env.WEBKIT_EXECUTABLE });
+  if (process.env.WEBKIT_EXECUTABLE || process.env.TEST_WEBKIT === '1') {
+    const safari = await webkit.launch({ headless: true, ...(process.env.WEBKIT_EXECUTABLE ? { executablePath: process.env.WEBKIT_EXECUTABLE } : {}) });
     try { await run(safari, 'webkit'); } finally { await safari.close(); }
   }
 } finally {

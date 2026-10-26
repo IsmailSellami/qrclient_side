@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { pool } from '../server/database.js';
-import vercelApp from '../api/index.js';
-import { app as localApp } from '../serveur.js';
+import { createApp } from '../server/app.js';
+import { randomUUID } from 'node:crypto';
 
 // SQL boundary stub: persist receipt/line/point writes, including rollback.
 // No test connects to or modifies the configured customer database.
-class Database {
+export class Database {
   constructor({ percent = 20, minimum = 0, points = 100, reward = null, visit = false, visitRow = null } = {}) {
     Object.assign(this, { percent, minimum, points, reward, visit, visitRow });
+    this.requests = new Map();
     this.receipt = null;
     this.lines = [];
     this.visits = 0;
@@ -24,6 +25,12 @@ class Database {
   async query(sql, args = []) {
     const q = sql.replace(/\s+/g, ' ').trim();
     const result = rows => ({ rows, rowCount: rows.length });
+    if (q.startsWith('INSERT INTO app_private.rate_limits')) return result([{ hits: 1 }]);
+    if (q.startsWith('SELECT pg_advisory')) return result([]);
+    if (q.startsWith('SELECT principal, digest, response FROM app_private.checkout_requests')) return result(this.requests.has(args[0]+args[1]) ? [this.requests.get(args[0]+args[1])] : []);
+    if (q.startsWith('INSERT INTO app_private.checkout_requests')) { this.requests.set(args[0]+args[1], {principal:args[2],digest:args[3],response:JSON.parse(args[4])}); return result([]); }
+    if (q.startsWith('SELECT response FROM app_private.checkout_requests')) return result(this.requests.has('cash'+args[0]) ? [this.requests.get('cash'+args[0])] : []);
+    if (q.startsWith('SELECT phone FROM qr_code')) return result([{phone:'20123456'}]);
     if (q === 'BEGIN') {
       this.snapshot = structuredClone({ receipt: this.receipt, lines: this.lines, points: this.points, claimed: this.claimed, visits: this.visits });
       return result([]);
@@ -32,8 +39,8 @@ class Database {
     if (/^(COMMIT|SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)/.test(q)) return result([]);
     if (q.startsWith('SELECT idname, price FROM product')) return result(args[0].filter(n => ['coffee', 'cake', 'fraction'].includes(n)).map(idname => ({ idname, price: { coffee: 10, cake: 4, fraction: 1.03 }[idname] })));
     if (q.includes('FROM promotion')) { this.promotionQueries++; return result(this.percent ? [{ discount_percent: this.percent, minimum_purchase_amount: this.minimum }] : []); }
-    if (q.includes('FROM qr_code WHERE token')) return result([{ id: 1, token: 'a'.repeat(24), status: 'active', name: 'Test', points: this.points }]);
-    if (q.includes('FROM customer_rewards cr')) return result(this.reward && !this.claimed ? [{ id: 3, ...this.reward }] : []);
+    if (q.includes('FROM qr_code WHERE token')) return result([{ id: 1, token: 'a'.repeat(24), status: 'active', name: 'Test', phone: '20123456', points: this.points }]);
+    if (q.includes('FROM customer_rewards cr')) return result(this.reward && !this.claimed && Number(args[0]) === 3 && Number(args[1]) === 1 ? [{ id: 3, ...this.reward }] : []);
     if (q.startsWith('UPDATE customer_rewards')) { this.claimed = true; return result([]); }
     if (q.includes('FROM loyalty_rewards')) return result(this.visit ? [{ id: 5, required_visits: 2, name: 'Reward' }] : []);
     if (q.startsWith('INSERT INTO system_state')) return result([]);
@@ -64,14 +71,19 @@ let db;
 pool.connect = async () => db.connect();
 pool.query = (...args) => db.query(...args);
 
-for (const [name, app] of [['local', localApp], ['Vercel', vercelApp]]) {
+const authFactory = () => ({ async getUser(jwt) { return { data: {user: jwt === 'valid' ? {id:'customer-a', phone:'21620123456',phone_confirmed_at:'2026-01-01'} : null}, error: jwt !== 'valid' }; } });
+for (const [name, local] of [['local', true], ['Vercel', false]]) {
+  const app = createApp({ pool, local, authFactory });
   test(name + ' checkout routes persist correct charges', async t => {
     const server = app.listen(0, '127.0.0.1');
     await once(server, 'listening');
     const base = 'http://127.0.0.1:' + server.address().port;
     t.after(() => new Promise(resolve => server.close(resolve)));
-    async function post(path, body) {
-      const response = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    let cashKey;
+    async function post(path, body, key = randomUUID()) {
+      if (path === "/demander") cashKey = key;
+      if (path === "/process-cash-payment") key = cashKey;
+      const response = await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key, Cookie: (local ? 'customer_session' : '__Host-customer_session') + '=valid' }, body: JSON.stringify(body) });
       return { status: response.status, ...await response.json() };
     }
     const order = { numtable: 60, items: [{ idname: 'coffee' }], totale: 10 };
@@ -84,7 +96,7 @@ for (const [name, app] of [['local', localApp], ['Vercel', vercelApp]]) {
         const paid = await post('/process-cash-payment', { idrecu: created.idrecu, total: 6.4 });
         assert.equal(paid.total, 10);
         assert.equal(db.receipt.total, 10);
-        assert.equal(db.receipt.discount, null);
+        assert.equal(db.receipt.discount, undefined);
         assert.equal(db.lines[0].price, 10);
         assert.equal(db.points, 100);
         assert.equal(db.visits, 0);
@@ -130,6 +142,38 @@ for (const [name, app] of [['local', localApp], ['Vercel', vercelApp]]) {
       const paid = await post('/process-card-payment', { ...card, items: [...card.items, { idname: 'cake' }], rewardId: 3 });
       assert.equal(paid.total, 10);
       assert.deepEqual(db.lines.map(l => l.price), [10, 0]);
+    });
+    await t.test('one free reward never makes multiple matching items free', async () => {
+      db = new Database({ percent: 0, reward: {reward_type:'free_item',product_id:'cake'} });
+      const paid = await post('/process-card-payment', {...card, items:[{idname:'cake'},{idname:'cake'},{idname:'cake'}],rewardId:3});
+      assert.equal(paid.total,8);
+      assert.deepEqual(db.lines.map(l=>l.price),[0,4,4]);
+    });
+    await t.test('another customer reward and invalid table/cart cannot be used', async () => {
+      db = new Database({ reward: {reward_type:'discount',discount_percent:50} });
+      assert.equal((await post('/process-card-payment',{...card,rewardId:99})).error,'REWARD_UNAVAILABLE');
+      assert.equal(db.points,100);assert.equal(db.receipt,null);
+      for(const body of [{...card,numtable:-1},{...card,numtable:1.5},{...card,items:[null]},{...card,items:Array(101).fill({idname:'coffee'})}]) {
+        assert.equal((await post('/process-card-payment',body)).status,400);
+      }
+    });
+    await t.test('receipt number alone cannot change another receipt', async () => {
+      db = new Database();
+      await post('/demander',order);
+      const response=await fetch(base+'/process-cash-payment',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':randomUUID()},body:JSON.stringify({idrecu:7,total:1})});
+      assert.equal(response.status,404);
+      assert.equal(db.receipt.method,undefined);
+      assert.equal(db.receipt.total,10);
+    });
+    await t.test('same checkout key cannot double charge or create duplicate lines', async () => {
+      db = new Database();
+      const key = randomUUID();
+      const first = await post('/process-card-payment',card,key);
+      const again = await post('/process-card-payment',card,key);
+      assert.deepEqual(again,first);
+      assert.equal(db.points,92);
+      assert.equal(db.lines.length,1);
+      assert.equal((await post('/process-card-payment',{...card,total:99},key)).status,409);
     });
     await t.test('new card charge preserves earlier cash receipt amount', async () => {
       db = new Database();

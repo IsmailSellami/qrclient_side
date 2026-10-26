@@ -1,3 +1,21 @@
+// Text used in HTML templates must be escaped, including data from the database.
+function safeColor(value) { return /^#[0-9a-f]{3,8}$/i.test(value || '') ? value : '#c49b63'; }
+let checkoutKey = null;
+function checkoutKeyFor(items) {
+  const fingerprint = JSON.stringify({ table: numtable, items });
+  try {
+    const previous = JSON.parse(sessionStorage.getItem('sellamo_checkout') || 'null');
+    if (previous?.fingerprint === fingerprint) return previous.key;
+    const key = crypto.randomUUID();
+    sessionStorage.setItem('sellamo_checkout', JSON.stringify({ fingerprint, key }));
+    return key;
+  } catch { return checkoutKey || crypto.randomUUID(); }
+}
+function finishCheckout() {
+  checkoutKey = null;
+  try { sessionStorage.removeItem('sellamo_checkout'); } catch {}
+}
+
 ﻿
 const categoryContainer = document.getElementById("categorie");
 const productContainer = document.getElementById("product");
@@ -77,7 +95,7 @@ const promotionBanner = document.getElementById("promotionBanner");
 const params = new URLSearchParams(window.location.search);
 const numtable = Number(params.get("table")) || 12;
 
-console.log("TABLE =", numtable);
+
 let selectedCategory = "Tous";
 let categories = [];
 let products = [];
@@ -539,7 +557,7 @@ function renderProducts() {
 }
 
 async function sendOrder() {
-    console.log('Attempting to send order:', { cart, numtable });
+
     if (!demanderBtn) return;
     if (cart.length === 0) {
         showToast("Votre panier est vide");
@@ -560,6 +578,7 @@ async function sendOrder() {
         const isLocationValid = await verifierLocalisation();
 
         if (isLocationValid) {
+            checkoutKey = checkoutKeyFor(items);
             pendingOrderItems = items;
             pendingOrderTotal = totale;
 
@@ -582,7 +601,7 @@ async function submitOrderToBackend() {
 
     const res = await fetch("/demander", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": checkoutKey },
         body: JSON.stringify({
             totale: pendingOrderTotal,
             items: pendingOrderItems,
@@ -767,24 +786,24 @@ function renderLoyaltyInfo(info) {
     progressHtml = `
       <div class="loyalty-progress">
         <div class="loyalty-progress__label">
-          <span>${tier ? tier.name : 'Débutant'}</span>
-          <span>${nextTier.name} (${nextMin} pts)</span>
+          <span>${escapeHtml(tier ? tier.name : 'Débutant')}</span>
+          <span>${escapeHtml(nextTier.name)} (${nextMin} pts)</span>
         </div>
         <div class="loyalty-progress__bar">
-          <div class="loyalty-progress__fill" style="width:${progress}%;background:${tier ? (tier.color || '#c49b63') : '#c49b63'}"></div>
+          <div class="loyalty-progress__fill" style="width:${progress}%;background:${safeColor(tier?.color)}"></div>
         </div>
         <div class="loyalty-progress__detail">${formatPoints(lifetime)} / ${nextMin} points</div>
       </div>`;
   } else {
     progressHtml = `
       <div class="loyalty-progress">
-        <div class="loyalty-progress__label"><span>${tier ? tier.name : 'Niveau maximal'}</span></div>
+        <div class="loyalty-progress__label"><span>${escapeHtml(tier ? tier.name : 'Niveau maximal')}</span></div>
         <div class="loyalty-progress__detail">${formatPoints(lifetime)} points cumulés — Niveau maximal atteint !</div>
       </div>`;
   }
 
   const tierBadgeHtml = tier
-    ? `<span class="loyalty-tier-badge" style="background:${tier.color || '#c49b63'}">${tier.icon || '⭐'} ${tier.name}</span>`
+    ? `<span class="loyalty-tier-badge" style="background:${safeColor(tier.color)}">${escapeHtml(tier.icon || '⭐')} ${escapeHtml(tier.name)}</span>`
     : `<span class="loyalty-tier-badge loyalty-tier-badge--default">⭐ Débutant</span>`;
 
   // Visit streak: the counter is the durable count of COMPLETED table sessions
@@ -811,7 +830,7 @@ function renderLoyaltyInfo(info) {
         </div>
         <div class="loyalty-visits__detail">${
           nextVisit
-            ? `Encore ${nextVisit.requiredVisits - visitCount} visite${nextVisit.requiredVisits - visitCount > 1 ? 's' : ''} pour : ${nextVisit.name}`
+            ? `Encore ${nextVisit.requiredVisits - visitCount} visite${nextVisit.requiredVisits - visitCount > 1 ? 's' : ''} pour : ${escapeHtml(nextVisit.name)}`
             : 'Toutes les récompenses de visites sont débloquées !'
         }</div>
       </div>`;
@@ -820,7 +839,7 @@ function renderLoyaltyInfo(info) {
   loyaltyInfoEl.innerHTML = `
     <div class="loyalty-info__header">
       ${tierBadgeHtml}
-      <div class="loyalty-info__name">${card.name || 'Client'}</div>
+      <div class="loyalty-info__name">${escapeHtml(card.name || 'Client')}</div>
     </div>
     <div class="loyalty-info__points">
       <span class="loyalty-info__points-value">${formatPoints(currentPoints)}</span>
@@ -850,18 +869,18 @@ function renderRewardSelection(earnedRewards) {
 
   const cardsHtml = available.map(r => {
     let typeLabel = 'Récompense';
-    if (r.rewardType === 'discount') typeLabel = `-${r.discountPercent}% de réduction`;
+    if (r.rewardType === 'discount') typeLabel = `-${Number(r.discountPercent)}% de réduction`;
     else if (r.rewardType === 'free_item') typeLabel = r.productId ? `Article gratuit : ${r.productId} (0.00 DT)` : 'Article gratuit';
     const notes = [];
     if (r.rewardType === 'discount' && hasPromotion && Number(r.discountPercent || 0) > 0) {
-      notes.push(`<div class="reward-note">Vous avez choisi une réduction de ${r.discountPercent}%. La promotion sera remplacée.</div>`);
+      notes.push(`<div class="reward-note">Vous avez choisi une réduction de ${Number(r.discountPercent)}%. La promotion sera remplacée.</div>`);
     }
     // Earned rewards remain selectable after their catalog period ends.
     return `
-      <div class="reward-card${r.isExpired ? ' reward-card--expired' : ''}" data-reward-id="${r.id}">
-        <div class="reward-card__name">${r.rewardName || r.name || 'Récompense'}</div>
-        <div class="reward-card__type">${typeLabel}</div>
-        ${r.mysteryResult ? `<div class="reward-card__mystery">${r.mysteryResult}</div>` : ''}
+      <div class="reward-card${r.isExpired ? ' reward-card--expired' : ''}" data-reward-id="${escapeHtml(r.id)}">
+        <div class="reward-card__name">${escapeHtml(r.rewardName || r.name || 'Récompense')}</div>
+        <div class="reward-card__type">${escapeHtml(typeLabel)}</div>
+        ${r.mysteryResult ? `<div class="reward-card__mystery">${escapeHtml(r.mysteryResult)}</div>` : ''}
       </div>
       ${notes.join('')}`;
   }).join('');
@@ -886,7 +905,7 @@ function renderRewardSelection(earnedRewards) {
     // in orderr.option on confirmation.
     freeOptionsEl.style.display = 'block';
     freeOptionsEl.innerHTML = `
-      <div class="reward-free-options__hint">Article gratuit : <strong>${freeName}</strong> (0.00 DT)</div>
+      <div class="reward-free-options__hint">Article gratuit : <strong>${escapeHtml(freeName)}</strong> (0.00 DT)</div>
       <label class="reward-free-options__label" for="rewardFreeChoice">Votre choix :</label>
       <textarea id="rewardFreeChoice" class="reward-free-options__textarea" rows="2" placeholder="Cappuccino, Express, etc."></textarea>
     `;
@@ -1074,7 +1093,7 @@ function loadHtml5QrcodeLib() {
 
   html5QrcodeLibPromise = new Promise((resolve, reject) => {
     const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js";
+    s.src = "/js/vendor/html5-qrcode.min.js";
     s.async = true;
     s.onload = () => (window.Html5Qrcode ? resolve() : reject(new Error("Html5Qrcode missing")));
     s.onerror = () => { html5QrcodeLibPromise = null; s.remove(); reject(new Error("Scanner library failed to load")); };
@@ -1351,6 +1370,47 @@ function extractToken(input) {
   return null;
 }
 
+function showCustomerVerification(token) {
+  qrResult.className = 'qr-result';
+  qrResult.replaceChildren();
+  const message = document.createElement('p');
+  message.textContent = 'Pour protéger votre solde, confirmez le numéro enregistré sur votre carte.';
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.className = 'verification-button';
+  send.textContent = 'Recevoir un code SMS';
+  const code = document.createElement('input');
+  code.type = 'text'; code.inputMode = 'numeric'; code.autocomplete = 'one-time-code';
+  code.maxLength = 10; code.setAttribute('aria-label', 'Code SMS');
+  code.placeholder = 'Code SMS'; code.hidden = true;
+  const verify = document.createElement('button');
+  verify.type = 'button'; verify.textContent = 'Vérifier le code'; verify.hidden = true;
+  verify.className = 'verification-button';
+  const status = document.createElement('p'); status.setAttribute('role', 'status');
+  send.addEventListener('click', async () => {
+    send.disabled = true;
+    try {
+      const response = await fetch('/api/auth/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({token}) });
+      if (!response.ok) throw new Error();
+      status.textContent = 'Si votre carte possède un numéro valide, un code a été envoyé. Sinon, contactez le gérant.';
+      code.hidden = verify.hidden = false;
+      code.focus();
+    } catch { status.textContent = 'Envoi indisponible. Réessayez plus tard ou contactez le gérant.'; }
+    finally { send.disabled = false; }
+  });
+  verify.addEventListener('click', async () => {
+    verify.disabled = true;
+    try {
+      const response = await fetch('/api/auth/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({token, code: code.value.trim()}) });
+      code.value = '';
+      if (!response.ok) throw new Error();
+      await verifyQrCode(token);
+    } catch { status.textContent = 'Code invalide ou expiré. Réessayez ou contactez le gérant.'; }
+    finally { verify.disabled = false; }
+  });
+  qrResult.append(message, send, code, verify, status);
+}
+
 async function verifyQrCode(qrId) {
   const generation = qrScannerGeneration;
   const current = () => generation === qrScannerGeneration && qrModal.classList.contains('open');
@@ -1369,7 +1429,12 @@ async function verifyQrCode(qrId) {
   resetLoyaltyUI();
 
   try {
-    const tokenRes = await fetch(`/api/loyalty/token/${qrId}`);
+    let tokenRes = await fetch(`/api/loyalty/token/${qrId}`);
+    if (!current()) return;
+    if (tokenRes.status === 401 || tokenRes.status === 403) {
+      showCustomerVerification(qrId);
+      return;
+    }
     const tokenData = await tokenRes.json();
     if (!current()) return;
 
@@ -1424,6 +1489,22 @@ async function verifyQrCode(qrId) {
       renderLoyaltyInfo(loyaltyCustomerInfo);
       renderRewardSelection(loyaltyCustomerInfo?.rewards || []);
     }
+    const logout = document.createElement('button');
+    logout.type = 'button';
+    logout.className = 'verification-button';
+    logout.textContent = 'Déconnecter la carte';
+    logout.addEventListener('click', async () => {
+      logout.disabled = true;
+      try {
+        const response = await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!response.ok) throw new Error();
+        pendingQrId = null;
+        resetLoyaltyUI();
+        confirmPaymentBtn.style.display = 'none';
+        showCustomerVerification(qrId);
+      } catch { logout.disabled = false; showToast('Déconnexion indisponible. Réessayez.'); }
+    });
+    qrResult.appendChild(logout);
 
     if (confirmPaymentBtn) {
       confirmPaymentBtn.textContent = `Confirmer le paiement — ${getEffectivePaymentTotal().toFixed(3)} DT`;
@@ -1461,7 +1542,7 @@ async function processCardPaymentWithReward() {
 
     const payRes = await fetch("/process-card-payment", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": checkoutKey },
       body: JSON.stringify(body)
     });
 
@@ -1479,6 +1560,7 @@ async function processCardPaymentWithReward() {
     }
 
     const chargedTotal = Number(payData.total);
+    finishCheckout();
     qrResult.className = "qr-result success";
     qrResult.innerHTML = `Paiement réussi ! Merci de votre visite.`;
     qrResult.style.display = "block";
@@ -1543,9 +1625,6 @@ function verifierLocalisation() {
                 async (position) => {
                     const latitude = position.coords.latitude;
                     const longitude = position.coords.longitude;
-
-                    console.log("Latitude:", latitude);
-                    console.log("Longitude:", longitude);
 
                     try {
                         const response = await fetch("/verify-location", {
@@ -1661,7 +1740,7 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
           try {
             const response = await fetch("/process-cash-payment", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: { "Content-Type": "application/json", "Idempotency-Key": checkoutKey },
               body: JSON.stringify({ idrecu: lastOrderIdrecu, total: lastOrderTotal })
             });
             const result = await response.json();
@@ -1671,6 +1750,7 @@ Promise.all([fetch("/getdata").then((r) => r.json()), fetch("/product").then((r)
             return;
           }
           hideCashModal();
+          finishCheckout();
           cart = [];
           pendingOrderItems = null;
           pendingOrderTotal = 0;

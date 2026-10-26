@@ -1,0 +1,13 @@
+.env*
+node_modules/**
+.git/**
+.vercel/**
+.agents/**
+.codex/**
+.aws/**
+artifacts/**
+test/**
+security/**
+migrations/**
+scripts/**
+*.log
