@@ -3,7 +3,7 @@ export const money = value => Math.round((Number(value) + Number.EPSILON) * 100)
 
 export async function loadPrices(db, items) {
   const names = [...new Set(items.map(item => String(item.idname)))];
-  const result = await db.query('SELECT idname, price FROM product WHERE idname = ANY($1)', [names]);
+  const result = await db.query('SELECT idname, price FROM product WHERE idname = ANY($1) AND archived = FALSE', [names]);
   const prices = new Map(result.rows.map(row => [String(row.idname), Number(row.price)]));
   if (names.some(name => !prices.has(name) || !Number.isFinite(prices.get(name)) || prices.get(name) < 0)) {
     const error = new Error('INVALID_PRODUCT');
@@ -13,12 +13,12 @@ export async function loadPrices(db, items) {
   return prices;
 }
 
-export function linePrice(item, prices, percent = 0, freeIds = new Set()) {
-  return freeIds.has(String(item.idname)) ? 0 : money(prices.get(String(item.idname)) * (100 - percent) / 100);
+export function linePrice(item, prices, percent = 0, freeIds = new Set(), index = -1) {
+  return freeIds.has(index) ? 0 : money(prices.get(String(item.idname)) * (100 - percent) / 100);
 }
 
 export function baseTotal(items, prices, percent = 0, freeIds = new Set()) {
-  return money(items.reduce((sum, item) => sum + linePrice(item, prices, percent, freeIds), 0));
+  return money(items.reduce((sum, item, index) => sum + linePrice(item, prices, percent, freeIds, index), 0));
 }
 
 export async function promotionPercent(db, total) {

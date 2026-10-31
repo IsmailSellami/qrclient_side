@@ -599,6 +599,19 @@ textarea{
   display: none;
 }
 
+.verification-button {
+  margin: 8px;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #8b4823;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+.verification-button:disabled { opacity: .6; cursor: wait; }
+.qr-result input { max-width: 100%; padding: 10px; font: inherit; box-sizing: border-box; }
+
 .qr-result.success {
   display: block;
   background: #d1fae5;

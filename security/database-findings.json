@@ -1,0 +1,467 @@
+{
+  "date": "2026-10-26",
+  "project": "ewciynnuevuzbcrwcjut",
+  "transport": "Read-only SQL using pre-existing unverified TLS; server identity not verified",
+  "tables": [
+    {
+      "schema": "public",
+      "name": "categorie",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "customer_challenges",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "customer_orders",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "customer_rewards",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "customer_visits",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "daily_stats",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "en_cour",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "loyalty_challenges",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "loyalty_recharge_packages",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "loyalty_rewards",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "notification_last_activity",
+      "relkind": "v",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "notifications",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "orderr",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "point_today",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "product",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "promotion",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "qr_code",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "recu",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "statistique",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "system_state",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "tablee",
+      "relkind": "r",
+      "rls": true,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "users",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    },
+    {
+      "schema": "public",
+      "name": "whatssup_session",
+      "relkind": "r",
+      "rls": false,
+      "force_rls": false,
+      "owner": "postgres"
+    }
+  ],
+  "publicPolicies": [
+    {
+      "schemaname": "public",
+      "tablename": "orderr",
+      "policyname": "Allow anon read",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "orderr",
+      "policyname": "Allow anon read ordere",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "recu",
+      "policyname": "Allow anon read",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "recu",
+      "policyname": "Allow anon read recu",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "tablee",
+      "policyname": "Allow anon read",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    },
+    {
+      "schemaname": "public",
+      "tablename": "tablee",
+      "policyname": "Allow anon read tablee",
+      "roles": "{anon}",
+      "cmd": "SELECT",
+      "qual": "true",
+      "with_check": null
+    }
+  ],
+  "functions": [
+    {
+      "schema": "public",
+      "name": "bump_whatsapp_usage",
+      "arguments": "usage_type_ text, delta_ integer",
+      "security_definer": false,
+      "settings": [
+        "search_path=public"
+      ],
+      "anon_execute": true,
+      "authenticated_execute": true
+    },
+    {
+      "schema": "public",
+      "name": "notify_worker_of_new_notification",
+      "arguments": "",
+      "security_definer": false,
+      "settings": null,
+      "anon_execute": true,
+      "authenticated_execute": true
+    },
+    {
+      "schema": "public",
+      "name": "use_reward",
+      "arguments": "p_customer_reward_id bigint, p_product_name text, p_delivery text, p_notes text, p_created_by text",
+      "security_definer": true,
+      "settings": [
+        "search_path=public"
+      ],
+      "anon_execute": true,
+      "authenticated_execute": true
+    }
+  ],
+  "storage": {
+    "buckets": [
+      {
+        "id": "products",
+        "public": true,
+        "file_size_limit": "5242880",
+        "allowed_mime_types": [
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+          "image/gif",
+          "image/avif"
+        ]
+      }
+    ],
+    "policies": []
+  },
+  "readOnlyRoleTests": [
+    {
+      "role": "anon",
+      "table": "qr_code",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "customer_orders",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "anon",
+      "table": "customer_rewards",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "customer_challenges",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "anon",
+      "table": "customer_visits",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "point_today",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "users",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "whatssup_session",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "orderr",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "recu",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "anon",
+      "table": "storage.objects",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "authenticated",
+      "table": "qr_code",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "customer_orders",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "authenticated",
+      "table": "customer_rewards",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "customer_challenges",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "authenticated",
+      "table": "customer_visits",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "point_today",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "users",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "whatssup_session",
+      "readAllowed": true,
+      "existingRowsVisible": true
+    },
+    {
+      "role": "authenticated",
+      "table": "orderr",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "authenticated",
+      "table": "recu",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    },
+    {
+      "role": "authenticated",
+      "table": "storage.objects",
+      "readAllowed": true,
+      "existingRowsVisible": false
+    }
+  ],
+  "notes": [
+    "DML permissions inferred from grants/RLS metadata; no production writes or mutating RPC calls attempted",
+    "Supabase Data API exposed-schema dashboard settings not available",
+    "Public-schema Data API presence confirmed over verified HTTPS; anonymous/authenticated HTTP sessions were not available, so role checks used read-only SET LOCAL ROLE SQL."
+  ],
+  "dataApiHttpsProbe": {
+    "status": 200,
+    "credentialRole": "server secret key (not printed)",
+    "method": "GET /rest/v1/ Accept application/openapi+json; no customer rows selected",
+    "sensitiveRoutesAdvertised": [
+      "qr_code",
+      "users",
+      "whatssup_session",
+      "customer_rewards",
+      "orderr",
+      "recu"
+    ]
+  },
+  "publicSchemaGrants": [
+    {
+      "schema": "public",
+      "grantee": "PUBLIC",
+      "privilege_type": "USAGE"
+    },
+    {
+      "schema": "public",
+      "grantee": "anon",
+      "privilege_type": "USAGE"
+    },
+    {
+      "schema": "public",
+      "grantee": "authenticated",
+      "privilege_type": "USAGE"
+    }
+  ],
+  "clientRoleMemberships": []
+}
