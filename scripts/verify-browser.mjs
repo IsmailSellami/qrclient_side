@@ -27,11 +27,12 @@ if (process.env.HTML5_QRCODE_PATH && process.env.QR_GENERATOR_PATH) {
 
 async function run(browser, name) {
   let cashBody;
-  async function pageFor({ width = 390, height = 664, count = 1, mode = 'native', torch = true, minimum = 0, percent = 20, requireOtp = false, malicious = false } = {}) {
+  async function pageFor({ width = 390, height = 664, count = 1, mode = 'native', torch = true, torchCapabilities = true, geoMode = 'fresh', minimum = 0, percent = 20, requireOtp = false, malicious = false } = {}) {
     const page = await browser.newPage({ viewport: { width, height }, isMobile: true, hasTouch: true, ignoreHTTPSErrors: !!process.env.BROWSER_TEST_CERT });
     page.setDefaultTimeout(10000);
     const errors = [];
     let verified = !requireOtp;
+    let locationCalls = 0;
     const payload = '<img src=x onerror=window.__xss=1>';
     page.on('pageerror', error => errors.push(error.message));
     await page.route('**/*', async route => {
@@ -53,7 +54,7 @@ async function run(browser, name) {
       if (url.pathname.startsWith('/api/loyalty/token/')) return verified ? json({ points: 100, name: 'Test' }) : route.fulfill({status:401,json:{error:'AUTH_REQUIRED'}});
       if (url.pathname.startsWith('/api/loyalty/public/customer/')) return json({ card: { points: 100, name: malicious ? payload : 'Test' }, rewards: malicious ? [{ id:3, rewardName:payload,mysteryResult:payload,rewardType:'free_item',productId:payload,isRedeemed:false }] : [], activeChallenges: [] });
       if (url.pathname === '/api/loyalty/visit/start') throw new Error('Removed visit display still makes requests');
-      if (url.pathname === '/verify-location') return json({ authorized: true });
+      if (url.pathname === '/verify-location') { locationCalls++; return json({ authorized: true }); }
       if (url.pathname === '/demander') {
         assert.match(route.request().headers()['idempotency-key'],/^[a-f0-9-]{36}$/);
         return json({ success: true, idrecu: 1, total: 10 });
@@ -61,9 +62,13 @@ async function run(browser, name) {
       if (url.pathname === '/process-cash-payment') { cashBody = route.request().postDataJSON(); return json({ success: true, total: 10 }); }
       return route.continue();
     });
-    await page.addInitScript(({ count, mode, torch, qrFixture }) => {
+    await page.addInitScript(({ count, mode, torch, torchCapabilities, geoMode, qrFixture }) => {
       localStorage.setItem('sellamo_cart', JSON.stringify(Array.from({ length: count }, (_, i) => ({ id: 'item-' + i, productKey: 'coffee', name: 'coffee', price: 10, img: '/css/background.jpg' }))));
-      Object.defineProperty(navigator, 'geolocation', { value: { getCurrentPosition(ok) { ok({ coords: { latitude: 0, longitude: 0 } }); } } });
+      Object.defineProperty(navigator, 'geolocation', { value: { getCurrentPosition(ok, fail, options) {
+        window.__geoOptions = options;
+        if (geoMode === 'denied') fail({ code: 1 });
+        else ok({ coords: { latitude: 0, longitude: 0, accuracy: 5 }, timestamp: Date.now() - (geoMode === 'stale' ? 30000 : 0) });
+      } } });
       window.__tracks = [];
       window.__constraints = [];
       window.__makeStream = () => {
@@ -88,13 +93,14 @@ async function run(browser, name) {
         }, 100);
         const track = stream.getVideoTracks()[0];
         let on = false;
-        track.getCapabilities = () => ({ torch });
+        track.getCapabilities = () => torchCapabilities ? { torch } : {};
         track.getConstraints = () => ({ facingMode: 'environment' });
         track.getSettings = () => torch ? { torch: on } : {};
         track.applyConstraints = async constraints => {
           window.__constraints.push(constraints);
-          if (window.__rejectTorch) throw new Error('Torch rejected');
-          on = constraints.torch;
+          const requestedTorch = constraints.torch ?? constraints.advanced?.[0]?.torch;
+          if (window.__rejectTorch || (!torch && requestedTorch)) throw new Error('Torch rejected');
+          on = requestedTorch;
         };
         window.__tracks.push(track);
         return stream;
@@ -130,18 +136,29 @@ async function run(browser, name) {
           async detect() { window.__detectCalls = (window.__detectCalls || 0) + 1; return window.__scan ? [{ rawValue: 'a'.repeat(24) }] : []; }
         };
       } else { delete window.BarcodeDetector; }
-    }, { count, mode, torch, qrFixture });
+    }, { count, mode, torch, torchCapabilities, geoMode, qrFixture });
     await page.goto(base);
     await page.waitForFunction(() => document.getElementById('cartCount').textContent !== '0');
-    return { page, errors };
+    return { page, errors, getLocationCalls: () => locationCalls };
   }
   async function checkout(page) {
     await page.locator('#openCart').click();
     await page.locator('#demanderBtn').click();
     await page.locator('#paymentModal.open').waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.getElementById('payCard').disabled);
+    assert.deepEqual(await page.evaluate(() => window.__geoOptions), {
+      enableHighAccuracy: true, timeout: 8000, maximumAge: 0
+    });
   }
   if (!process.env.BROWSER_SECURITY_ONLY) {
+  for (const geoMode of ['denied', 'stale']) {
+    const { page, getLocationCalls } = await pageFor({ geoMode });
+    await checkout(page);
+    assert.equal(await page.locator('#paymentModal').isVisible(), true, 'location must not block checkout');
+    assert.equal(getLocationCalls(), 0, 'denied or stale fixes must not be sent to the server');
+    if (geoMode === 'denied') assert.match(await page.locator('#toast').innerText(), /Autorisez la localisation/);
+    await page.close();
+  }
   for (const [width, height] of [[320, 480], [360, 640], [390, 664], [844, 390], [390, 280], [1440, 900]]) {
     console.log(name, 'cart', width, height);
     const { page, errors } = await pageFor({ width, height, count: 30 });
@@ -188,9 +205,13 @@ async function run(browser, name) {
     }
   }
   for (const mode of ['native', 'fallback']) {
-    for (const torch of [true, false]) {
+    for (const { torch, torchCapabilities } of [
+      { torch: true, torchCapabilities: true },
+      { torch: true, torchCapabilities: false },
+      { torch: false, torchCapabilities: true }
+    ]) {
       console.log(name, 'camera', mode, torch);
-      const { page, errors } = await pageFor({ mode, torch });
+      const { page, errors } = await pageFor({ mode, torch, torchCapabilities });
       await checkout(page);
       await page.locator('#payCard').click();
       await page.locator('#qrFlashBtn').waitFor({ state: 'visible' });
@@ -206,7 +227,8 @@ async function run(browser, name) {
         assert.equal(await page.locator('#qrFlashBtn').innerText(), 'Allumer la lampe');
         await page.locator('#qrFlashBtn').click();
       } else {
-        assert.equal(await page.locator('#qrFlashBtn').isDisabled(), true);
+        assert.equal(await page.locator('#qrFlashBtn').isDisabled(), false);
+        await page.locator('#qrFlashBtn').click();
         assert.match(await page.locator('#qrFlashBtn').innerText(), /indisponible/);
       }
       await page.locator('#qrClose').click();

@@ -575,16 +575,14 @@ async function sendOrder() {
     demanderBtn.textContent = "Vérification...";
 
     try {
-        const isLocationValid = await verifierLocalisation();
-
-        if (isLocationValid) {
-            checkoutKey = checkoutKeyFor(items);
-            pendingOrderItems = items;
-            pendingOrderTotal = totale;
-
-            setCartOpen(false);
-            showPaymentModal();
-        }
+        // Location is useful context, but the current backend does not enforce
+        // a geofence. Never hold checkout open while the OS searches for GPS.
+        void verifierLocalisation();
+        checkoutKey = checkoutKeyFor(items);
+        pendingOrderItems = items;
+        pendingOrderTotal = totale;
+        setCartOpen(false);
+        showPaymentModal();
     } catch (_err) {
         console.error("Error in sendOrder:", _err);
         showToast("Erreur de vérification. Veuillez réessayer.");
@@ -1240,15 +1238,17 @@ function getActiveCameraTrack() {
 }
 
 function trackSupportsTorch(track) {
-  try {
-    const capability = track?.getCapabilities?.().torch;
-    if (capability !== undefined) return capability === true || (Array.isArray(capability) && capability.includes(true));
-    return typeof track?.getSettings?.().torch === 'boolean';
-  } catch { return false; }
+  // WebKit and some Android camera tracks omit torch from capabilities/settings
+  // even when applyConstraints({advanced:[{torch:true}]}) is supported.
+  return Boolean(track && track.readyState === 'live' && typeof track.applyConstraints === 'function');
 }
 
 function torchConstraints(track, on) {
-  return { ...track.getConstraints?.(), torch: on, advanced: [{ torch: on }] };
+  const current = track.getConstraints?.() || {};
+  // A basic torch constraint is mandatory; putting torch only in `advanced`
+  // makes unsupported browsers silently ignore it because advanced sets are
+  // optional. Keep the camera's existing facing/resolution constraints.
+  return { ...current, torch: on };
 }
 
 function stopQrScanner() {
@@ -1304,8 +1304,8 @@ async function toggleTorch() {
     const next = !qrTorchOn;
     await track.applyConstraints(torchConstraints(track, next));
     if (track !== getActiveCameraTrack() || !qrScannerRunning) return;
-    const actual = track.getSettings?.().torch;
-    if (typeof actual === 'boolean' && actual !== next) throw new Error('Torch unavailable');
+    // Some Safari releases report stale getSettings().torch values, so the
+    // accepted mandatory constraint is the success signal.
     qrTorchOn = next;
     setTorchButton(next);
     qrFlashBtn.disabled = false;
@@ -1314,6 +1314,7 @@ async function toggleTorch() {
     qrTorchOn = false;
     setTorchButton(false);
     qrFlashBtn.textContent = 'Lampe indisponible sur cet appareil';
+    qrFlashBtn.disabled = false;
     // Scanning continues when a device rejects torch constraints.
   }
 }
@@ -1604,85 +1605,60 @@ async function processCardPaymentWithReward() {
 
 function verifierLocalisation() {
     return new Promise((resolve) => {
-        console.log("Attempting to get user location...");
-
         if (!navigator.geolocation) {
-            console.log("GPS non disponible");
-            showToast("Geolocation is not supported by your browser");
+            showToast("La localisation n’est pas disponible dans ce navigateur.");
             resolve(false);
             return;
         }
-
-        const MAX_RETRIES = 60;
-        let attempt = 0;
-        let waitingToastShown = false;
-
-        const tryGetPosition = () => {
-            attempt++;
-            console.log("Requesting user location... (attempt " + attempt + ")");
-
-            navigator.geolocation.getCurrentPosition(
-                async (position) => {
-                    const latitude = position.coords.latitude;
-                    const longitude = position.coords.longitude;
-
-                    try {
-                        const response = await fetch("/verify-location", {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json"
-                            },
-                            body: JSON.stringify({
-                                latitude,
-                                longitude
-                            })
-                        });
-
-                        const data = await response.json();
-
-                        if (data.authorized) {
-                            resolve(true);
-                        } else {
-                            console.log("Position refusée par le serveur");
-                            showToast("Please entre to the coffe");
-                            resolve(false);
-                        }
-                    } catch (error) {
-                        console.log("Erreur serveur:", error);
-                        showToast("Server error during location verification");
-                        resolve(false);
-                    }
-                },
-                (error) => {
-                    console.log("GPS refusé ou erreur:", error);
-
-                    if (error.code === 1) {
-                        showToast("Location is blocked. To confirm your order you must allow GPS access in your browser settings.");
-                        resolve(false);
-                        return;
-                    }
-
-                    if (!waitingToastShown) {
-                        waitingToastShown = true;
-                        showToast("En attente du GPS... Veuillez activer votre localisation.");
-                    }
-
-                    if (attempt < MAX_RETRIES) {
-                        setTimeout(tryGetPosition, 1500);
-                    } else {
-                        showToast("Unable to verify your location. Veuillez réessayer.");
-                        resolve(false);
-                    }
-                },
-                {
-                    enableHighAccuracy: true,
-                    timeout: 10000,
-                    maximumAge: 0
-                }
-            );
+        let settled = false;
+        let timeoutId;
+        const finish = (ok) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            resolve(ok);
         };
-
-        tryGetPosition();
+        const onVisibilityChange = () => {
+            // Mobile browsers suspend/throttle geolocation while backgrounded
+            // or locked. Do not wait for a callback that may never arrive.
+            if (document.hidden) finish(false);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        timeoutId = setTimeout(() => finish(false), 9000);
+        try {
+            navigator.geolocation.getCurrentPosition(async (position) => {
+                if (settled) return;
+                const ageMs = Date.now() - position.timestamp;
+                const { latitude, longitude, accuracy } = position.coords || {};
+                // maximumAge:0 requests a fresh fix. Reject cached, future-dated,
+                // malformed, or very coarse positions as current observations.
+                if (ageMs < 0 || ageMs > 15000 || !Number.isFinite(latitude) ||
+                    !Number.isFinite(longitude) || !Number.isFinite(accuracy) || accuracy > 150) {
+                    finish(false);
+                    return;
+                }
+                try {
+                    const response = await fetch("/verify-location", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ latitude, longitude, accuracy, timestamp: position.timestamp })
+                    });
+                    const data = await response.json();
+                    finish(Boolean(response.ok && data.authorized));
+                } catch {
+                    finish(false);
+                }
+            }, (error) => {
+                if (settled) return;
+                if (error?.code === 1) showToast("Autorisez la localisation dans les réglages du navigateur et vérifiez que les services de localisation sont activés.");
+                else if (error?.code === 2) showToast("Position indisponible. Vérifiez les services de localisation du téléphone.");
+                else if (error?.code === 3) showToast("La recherche de position a expiré. Réessayez à l’écran, téléphone déverrouillé.");
+                finish(false);
+            }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+        } catch {
+            finish(false);
+        }
     });
 }
 
